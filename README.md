@@ -51,6 +51,8 @@ Obsidian Agent Client ──(ACP JSON-RPC over stdin/stdout)──▶ dsh-acp �
 | `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
 | `scripts/test-client.js` | ACP client harness for standalone verification |
 | `README.runtime.md` | runtime/debugging notes from the Obsidian integration |
+| `README.zh-CN.md` | 中文版说明文档 (Chinese) |
+| `README.ru.md` | Документация на русском (Russian) |
 
 ## Standalone usage
 
