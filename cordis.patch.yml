@@ -1,0 +1,12 @@
+# dsh-acp plugin insert for a DSH profile.
+#
+# This makes `dsh plugin --profile <name> add dsh-acp` register the plugin's
+# cordis entry (index.mjs), which provides the `dsh.acp` service and manages
+# the dsh-acp ACP adapter process for the harness.
+#
+# The ACP *server binary* itself stays standalone (`bin: dsh-acp` ) so a GUI
+# ACP client (Obsidian Agent Client) can spawn it directly via its custom-agent
+# `command` — that is where the runtime prompt loop actually happens.
+- insert:
+    - id: dsh-acp
+      name: dsh-acp

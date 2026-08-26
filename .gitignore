@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Runtime state
+logs/
+*.log
+
+# Temp / cache
+tmp-cache/
+.tmp/
+
+# OS
+.DS_Store
+
+# Editor
+*.swp

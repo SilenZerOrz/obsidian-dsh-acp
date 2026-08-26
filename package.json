@@ -1,0 +1,43 @@
+{
+  "name": "dsh-acp",
+  "version": "0.1.0",
+  "description": "Expose DeepSeek Harness over the Agent Client Protocol (ACP) so ACP clients — Obsidian Agent Client, editors, Claude Code clients — can drive DSH. Ships the dsh-acp ACP server binary plus a cordis plugin that registers the dsh.acp service and manages the adapter process.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./dsh-acp": "./dsh-acp.mjs",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-acp": "./dsh-acp.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "dsh-acp.mjs",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node dsh-acp.mjs"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "acp",
+    "agent-client-protocol",
+    "obsidian",
+    "agent"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  }
+}
