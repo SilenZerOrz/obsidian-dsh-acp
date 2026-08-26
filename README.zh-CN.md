@@ -49,7 +49,6 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 | `cordis.patch.yml` | 供 `dsh plugin ... add dsh-acp` 使用的插件插入层 |
 | `scripts/dsh-acp.js` | ACP 服务器适配器（运行时参考副本） |
 | `scripts/test-client.js` | 用于独立验证的 ACP 客户端测试工具 |
-| `README.runtime.md` | 来自 Obsidian 集成的运行时/调试说明 |
 
 ## 独立使用
 
