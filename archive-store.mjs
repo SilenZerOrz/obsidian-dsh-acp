@@ -14,7 +14,7 @@
 //     process can read it back ("write ACP sessions back into DSH web's own
 //     conversation archive").
 
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, statSync, rmSync } from "node:fs";
 import { join, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -171,9 +171,21 @@ export function forkSession(sourceSessionId, cwd) {
   return rec;
 }
 
-/** Delete a session record from the durable index. */
+/** Delete a session record from the durable index AND its on-disk archive. */
 export function deleteSession(sessionId) {
   const idx = loadIndex();
+  const rec = idx.sessions[sessionId];
+  // Also remove the on-disk archive directory. If we only drop the index
+  // record, listSessions() re-surfaces the session via scanArchives() (disk
+  // scan), so Obsidian shows "deleted" but the session reappears on reload.
+  if (rec && rec.cwd) {
+    const dir = archiveDir(rec.cwd, sessionId);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (err) {
+      // Best-effort: index removal still succeeds if disk cleanup fails.
+    }
+  }
   delete idx.sessions[sessionId];
   persistIndex();
 }
