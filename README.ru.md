@@ -1,25 +1,37 @@
-# dsh-acp
+# obsidian-dsh-acp
 
-Адаптер [ACP (Agent Client Protocol)][acp], который раскрывает **DeepSeek
-Harness (DSH)** как ACP-сервер через stdin/stdout, чтобы ACP-клиенты — плагин
-**Agent Client** в Obsidian, клиенты Claude Code, редакторы — могли управлять
-DSH через локальный CLI `dsh`.
+`obsidian-dsh-acp` — это **ACP (Agent Client Protocol)**-плагин/адаптер, который
+связывает **DeepSeek Harness (DSH)** с **Obsidian**. Настройте его как *Custom
+Agent* в плагине **Agent Client** в Obsidian (или установите как cordis-плагин
+в профиль DSH) — и вы сможете управлять DSH прямо из Obsidian: запускать диалоги
+и задачи DeepSeek Harness, не выходя из приложения.
 
-Каждый ход (prompt turn) порождает новый запуск
+Это **ACP-сервер** (говорит на ACP v1 через stdin/stdout), который стоит между
+Obsidian и DSH:
 
 ```text
-dsh --profile headless "<prompt>"
+Obsidian (плагин Agent Client)
+      │  ① запускается как Custom Agent по протоколу ACP
+      ▼
+obsidian-dsh-acp (ACP-сервер)
+      │  ② один prompt на ход
+      ▼
+dsh --profile headless "<prompt>"   (одноразовая задача DeepSeek Harness)
 ```
 
-(одноразовую, не сохраняющую состояния задачу), повторяя подход, которым
-`claude-agent-acp` оборачивает Claude Code. Вывод транслируется клиенту обратно
-в виде обновлений `agent_message_chunk`, после чего возвращается финальный
-результат `end_turn`.
+Он повторяет подход `claude-agent-acp` к обёртке Claude Code. Каждый ход (prompt turn):
+- запускает свежий `dsh --profile headless "<prompt>"` (одноразовую задачу);
+- потоково возвращает вывод DSH как обновления `agent_message_chunk`;
+- по завершении возвращает результат `end_turn`.
+
+Также поддерживается управление сессиями: постоянный список сессий (чтобы
+"Session history" в Obsidian могла перезагружать реальные сессии), ветвление
+сессий `session/fork` и зеркалирование каждого хода в архив DSH.
 
 Репозиторий содержит две дополняющие друг друга части:
 
 1. **`dsh-acp.mjs`** — автономный бинарник ACP-сервера (`bin: dsh-acp`).
-   GUI ACP-клиенты запускают его напрямую как дочерний процесс.
+   GUI ACP-клиенты (Obsidian Agent Client) запускают его напрямую как дочерний процесс.
 2. **`index.mjs`** — [cordis][cordis]-плагин, который регистрирует сервис
    `dsh.acp` и управляет процессом адаптера *внутри* harness; используется через
    `dsh plugin --profile <name> add obsidian-dsh-acp`.
@@ -33,9 +45,33 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
 ```
 
 - ACP v1 (JSON-RPC с разделителями-переводами строк) через stdin/stdout процесса.
-- Потоковое возвращение вывода DSH в виде обновлений `agent_message_chunk`, затем
+- Потоковое возвращение вывода DSH как обновлений `agent_message_chunk`, затем
   возвращается `result` (`stopReason: "end_turn"`).
-- Сессии не хранят состояние (каждый ход независим); `cwd` учитывается.
+- Учитывается `cwd`; постоянный слой сессий делает управление сессиями удобным.
+
+## Возможности сессий
+
+Помимо модели «один ход без состояния», `dsh-acp` добавляет постоянный слой
+сессий (`archive-store.mjs`), который обеспечивает три вещи:
+
+1. **Перезагрузка списка сессий** — `session/list` возвращает устойчивые сессии
+   из JSON-индекса на диске (по умолчанию `~/.dsh-acp/dsh-acp-sessions.json`),
+   поэтому перезагрузка «Session history» в Obsidian показывает реальные сессии
+   даже после перезапуска адаптера. При инициализации адаптер объявляет
+   `sessionCapabilities.list`.
+2. **Ветвление (fork) сессии** — `session/fork` глубоко копирует историю
+   сообщений исходной сессии в новый id сессии, фиксирует связь с родителем и
+   объявляет `sessionCapabilities.fork`, так что действие «fork» клиента работает.
+3. **Резервная копия каждого хода** — каждый завершённый ход (пользователь +
+   ассистент) дописывается в архив событий в формате DSH:
+   `<DSH_HOME>/dsh-acp-archives/<encoded-cwd>/session-<id>/session.jsonl`.
+   Он хранится в `dsh-acp-archives/` (а не в `sessions/` веб-процесса), чтобы
+   обычный `.jsonl` не конфликтовал со zstd-сжатыми журналами сессий основного
+   процесса. Задайте `DSH_ACP_ARCHIVE_IN_MAIN=1`, чтобы помещать архив в
+   `sessions/` вместо этого (только если вы запускаете архив в том же режиме
+   сжатия).
+
+`session/resume` и `session/load` заново открывают сохранённую сессию.
 
 ## Требования
 
@@ -47,10 +83,52 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
 | Путь | Назначение |
 |------|------------|
 | `dsh-acp.mjs` | Автономный бинарник ACP-сервера (`bin: dsh-acp`) |
+| `archive-store.mjs` | Постоянное хранилище сессий + запись архива в формате DSH |
 | `index.mjs` | Точка входа cordis-плагина (сервис `dsh.acp` + менеджер процесса адаптера) |
 | `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
 | `scripts/dsh-acp.js` | Адаптер ACP-сервера (рабочая справочная копия) |
 | `scripts/test-client.js` | Клиентское тестовое окружение ACP для автономной проверки |
+| `acp-feature-test.mjs` | Протокольный функциональный тест (list / fork / resume / archive) |
+| `install.sh` | Установщик в один клик (профиль DSH + custom agent Obsidian) |
+| `README.zh-CN.md` | Документация на китайском (Chinese) |
+| `README.ru.md` | Документация на русском (Russian) |
+
+## Быстрая установка (в один клик)
+
+В пакете есть `install.sh` — параметризованный установщик, который: (a) устанавливает
+плагин в профиль DSH через официальный путь `dsh plugin add` и (b) настраивает
+custom agent для плагина **Agent Client** в Obsidian, с опциональной конфигурацией
+окружения. Он **идемпотентен**, **создаёт резервные копии** перед изменением
+любого файла, поддерживает **любой Obsidian vault** и может быть предпросмотрен
+через `--dry-run`.
+
+```bash
+# сначала предпросмотр (рекомендуется, ничего не изменяет)
+./install.sh --obsidian-vault /путь/к/любому/vault --dry-run
+
+# реальная установка в профиль "web" + настройка Obsidian
+./install.sh --obsidian-vault /путь/к/любому/vault
+
+# установка в другой профиль DSH
+./install.sh --profile headless --obsidian-vault /путь/к/любому/vault
+
+# только DSH (пропустить Obsidian)
+./install.sh --no-obsidian
+```
+
+Запустите `./install.sh --help` для полного списка опций. Основные:
+
+| Опция | Значение |
+|-------|----------|
+| `--profile <name>` | Профиль DSH для установки (по умолчанию `web`) |
+| `--dsh-home <dir>` | Корень данных DSH (по умолчанию `$DSH_HOME` или `~/.dsh`) |
+| `--obsidian-vault <dir>` | Любой Obsidian vault для настройки (поддерживает произвольный путь) |
+| `--package <src>` | Источник плагина: `<tgz>` / `<npm name>` / `link:<dir>` |
+| `--node-bin <path>` | Бинарник node для custom agent |
+| `--profile-env` | Вывести рекомендуемые переменные окружения адаптера |
+| `--no-obsidian` | Пропустить шаг настройки Obsidian |
+| `--dry-run` | Только предпросмотр, ничего не изменяет |
+| `--uninstall` | Восстановить резервные копии и удалить добавленную этим скриптом конфигурацию |
 
 ## Автономное использование
 
@@ -63,8 +141,27 @@ node scripts/test-client.js "reply with just the word HELLO"
 
 ### Конфигурация (Obsidian Agent Client)
 
-Отредактируйте `<vault>/.obsidian/plugins/agent-client/data.json` (или используйте
-интерфейс настроек плагина) → добавьте Custom Agent:
+Настроить custom agent можно двумя способами: **в один клик** (запустите
+`install.sh --obsidian-vault <vault>`, см. выше) или **вручную**, как описано ниже.
+
+**Ручные шаги в Obsidian:**
+
+1. Установите плагин **Agent Client** (Настройки → Сторонние плагины → Обзор →
+   поиск "Agent Client") и включите его.
+2. Откройте настройки плагина → **Custom Agents** → **Add**.
+3. Заполните:
+   - **ID**: `dsh-acp`
+   - **Display name**: `DeepSeek Harness (ACP)`
+   - **Command**: абсолютный путь к `dsh-acp.mjs` из этого пакета
+   - **Args**: *пусто*
+   - **Env** (необязательно): например,
+     `DSH_ACP_LOG_DIR` → `/абсолютный/путь/к/логам`
+4. Установите **nodePath** плагина на реальный бинарник `node` (>= 22.13),
+   чтобы корректно обрабатывался shebang.
+5. Перезагрузите Obsidian (Cmd-R) и выберите *DeepSeek Harness (ACP)*
+   в выборе агента.
+
+Если конфигурируете непосредственным редактированием `data.json`:
 
 ```json
 {
@@ -76,25 +173,29 @@ node scripts/test-client.js "reply with just the word HELLO"
 }
 ```
 
-Убедитесь, что **nodePath** плагина указывает на настоящий бинарник `node`, чтобы
-корректно обрабатывался shebang, затем перезагрузите Obsidian и выберите
-*DeepSeek Harness (ACP)* в выборе агента.
-
-### Переменные окружения
-
-| Переменная | Значение | По умолчанию |
-|--------|---------|---------|
-| `DSH_BIN` | исполняемый файл `dsh` | `dsh` из PATH |
-| `DSH_PROFILE` | запускаемый профиль | `headless` |
-| `DSH_ARGS` | дополнительные аргументы перед промптом (через пробел) | *отсутствуют* |
-| `DSH_ACP_LOG_DIR` | каталог для журнала выполнения | *выключено* |
-
 ## Использование cordis-плагина
 
-Установите в профиль DSH и включите запись:
+Установите в профиль DSH через официальный механизм плагинов (благодаря манифесту
+`dsh.bundle` в `package.json` плагин можно установить через `dsh plugin add`):
 
 ```bash
+# из npm registry (после публикации)
 dsh plugin --profile web add obsidian-dsh-acp
+
+# из локального артефакта публикации (tarball)
+dsh plugin --profile web add ./obsidian-dsh-acp-0.1.0.tgz
+
+# из локального клона (симлинк, режим разработки)
+dsh plugin --profile web add -w link:/path/to/dsh-acp
+```
+
+Проверьте, что плагин зарегистрирован в конфигурационном дереве профиля:
+
+```bash
+dsh --profile web --dump-config | grep -A1 "dsh-acp"
+# -> # == obsidian-dsh-acp
+#    - id: dsh-acp
+#      name: obsidian-dsh-acp
 ```
 
 Плагин считывает `cordis.patch.yml`, вставляет запись `dsh-acp` в дерево плагинов
@@ -104,6 +205,21 @@ dsh plugin --profile web add obsidian-dsh-acp
 - `service.start()` / `service.stop()` — запуск / завершение дочернего процесса
   адаптера.
 - `service.process` — активный `ChildProcess` (null, когда не запущен).
+
+### Переменные окружения адаптера
+
+Запущенный процесс `dsh --profile <name>` читает эти переменные окружения. Задайте
+их для адаптера (через `env` custom-agent в Obsidian или для профиля/управляемого
+процесса) по мере необходимости:
+
+| Переменная | Значение | По умолчанию |
+|------------|----------|--------------|
+| `DSH_BIN` | исполняемый файл `dsh` | `dsh` из PATH |
+| `DSH_PROFILE` | запускаемый профиль | `headless` |
+| `DSH_ARGS` | дополнительные аргументы перед промптом (через пробел) | *отсутствуют* |
+| `DSH_ACP_LOG_DIR` | каталог для журнала выполнения | *выключено* |
+| `DSH_ACP_STORE_DIR` | каталог постоянного JSON-индекса сессий | `~/.dsh-acp` |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | помещать архивы ходов в `sessions/` вместо `dsh-acp-archives/` | `0` |
 
 Конфигурация (предоставляется загрузчиком):
 
