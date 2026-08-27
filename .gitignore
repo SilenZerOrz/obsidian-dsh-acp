@@ -17,3 +17,6 @@ tmp-cache/
 
 # Publish artifacts
 *.tgz
+
+# Installer backups
+.install-backups/
