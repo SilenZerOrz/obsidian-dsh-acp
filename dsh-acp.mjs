@@ -9,10 +9,29 @@
 // ACP clients can drive this adapter exactly like they drive claude-agent-acp;
 // Obsidian's "Agent Client" plugin is a supported client. The cordis plugin in
 // this package also provides a `dsh.acp` service to manage this process.
+//
+// Session features (beyond the stateless baseline):
+//   - Persistent session list (survives adapter restarts, so Obsidian's
+//     "reload session list" shows real, durable sessions).
+//   - session/fork — branch a new session from an existing one.
+//   - session/resume + session/load — reopen an archived session.
+//   - Each completed turn is mirrored into a DSH official archive under
+//     <DSH_HOME>/sessions/<encoded-cwd>/session-<id>/session.jsonl so DSH web's
+//     own conversation archive can read the ACP sessions back.
 
 import { agent as acpAgent, methods, ndJsonStream, RequestError } from "@agentclientprotocol/sdk";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import {
+  allSessions,
+  createSession,
+  ensureSession,
+  getSession,
+  forkSession,
+  deleteSession as storeDelete,
+  recordMessage,
+  scanArchives,
+} from "./archive-store.mjs";
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -50,15 +69,6 @@ if (logDir) {
   } catch (err) {
     console.error("dsh-acp: failed to init log file", err);
   }
-}
-
-// ---- Session state -------------------------------------------------------
-// Lightweight in-memory index. Sessions are stateless: every prompt turn
-// spawns a fresh headless DSH invocation. cwd is honored.
-const sessions = new Map();
-
-function newSessionId() {
-  return `dsh-${randomUUID()}`;
 }
 
 // ---- Running DSH ---------------------------------------------------------
@@ -119,56 +129,96 @@ const DEFAULTS = {
   }),
 };
 
+/** Merge disk-scanned archives with the durable index for session/list. */
+function listSessionRecords(cwd) {
+  const indexRecords = allSessions().map((s) => ({
+    id: s.id,
+    title: s.title,
+    cwd: s.cwd,
+    parentSessionId: s.parentSessionId,
+  }));
+  const scanned = scanArchives(cwd).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, parentSessionId: null }));
+  // De-dupe by id, index records first.
+  const seen = new Set(indexRecords.map((s) => s.id));
+  return indexRecords.concat(scanned.filter((s) => !seen.has(s.id)));
+}
+
 function createAgent() {
   return {
     async initialize() {
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: false },
-        agentInfo: { name: "dsh-acp", title: "DeepSeek Harness", version: "0.1.0" },
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: {
+            list: {},
+            delete: {},
+            fork: {},
+            resume: {},
+            close: {},
+          },
+        },
+        agentInfo: { name: "dsh-acp", title: "DeepSeek Harness", version: "0.2.0" },
       };
     },
+
     async newSession(params) {
-      const id = newSessionId();
-      const cwd = params.cwd ?? process.cwd();
-      sessions.set(id, { id, cwd, title: params._meta?.title ?? "DSH", createdAt: new Date().toISOString() });
-      return {
-        sessionId: id,
-        modes: DEFAULTS.initializeModes(),
-      };
+      const rec = createSession({ cwd: params.cwd, title: params._meta?.title });
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
     },
+
     async loadSession(params) {
-      if (!sessions.has(params.sessionId)) {
-        sessions.set(params.sessionId, { id: params.sessionId, cwd: params.cwd ?? process.cwd(), title: "DSH", createdAt: new Date().toISOString() });
-      }
-      return { sessionId: params.sessionId, modes: DEFAULTS.initializeModes() };
+      const rec = ensureSession(params.sessionId, params.cwd);
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
     },
-    async listSessions() {
-      return { sessions: [...sessions.values()].map((s) => ({ sessionId: s.id, title: s.title })) };
+
+    async listSessions(params) {
+      const cwd = params.cwd ?? process.cwd();
+      const sessions = listSessionRecords(cwd).map((s) => ({
+        sessionId: s.id,
+        title: s.title,
+        cwd: s.cwd,
+        // Some clients display parent/lineage when present.
+        parentSessionId: s.parentSessionId ?? undefined,
+      }));
+      return { sessions, nextCursor: null };
     },
+
     async deleteSession(params) {
-      sessions.delete(params.sessionId);
+      storeDelete(params.sessionId);
       return { deleted: params.sessionId };
     },
+
     async resumeSession(params) {
-      if (!sessions.has(params.sessionId)) throw new RequestError(`session ${params.sessionId} not found`);
-      return { sessionId: params.sessionId, modes: DEFAULTS.initializeModes() };
+      const rec = getSession(params.sessionId);
+      if (!rec) throw new RequestError(`session ${params.sessionId} not found`);
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
     },
+
+    async forkSession(params) {
+      const rec = forkSession(params.sessionId, params.cwd);
+      if (!rec) throw new RequestError(`source session ${params.sessionId} not found`);
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
+    },
+
     async closeSession() { return undefined; },
     async setSessionMode() { return undefined; },
     async setSessionConfigOption(params) {
-      const session = sessions.get(params.sessionId);
+      const session = getSession(params.sessionId);
       return { configOptions: session?.configOptions ?? [] };
     },
     async authenticate() { return undefined; },
     async logout() { return undefined; },
+
     async prompt(params, ctx) {
-      const session = sessions.get(params.sessionId);
-      const cwd = session?.cwd ?? process.cwd();
+      const session = getSession(params.sessionId) ?? ensureSession(params.sessionId, params.cwd);
+      const cwd = session.cwd ?? process.cwd();
       const promptText = extractPromptText(params.prompt);
       if (logFile) console.log(`prompt session=${params.sessionId} cwd=${cwd} ${promptText.slice(0, 200)}`);
       const messageId = `msg-${randomUUID()}`;
       let receivedChunks = false;
+      // Archive the user turn (function 3: write back to DSH archive).
+      try { recordMessage(session.id, "user", promptText); } catch {}
       try {
         const output = await runDsh(promptText, cwd, (chunk) => {
           receivedChunks = true;
@@ -177,10 +227,13 @@ function createAgent() {
             ...textChunk(messageId, chunk),
           }).catch((e) => console.log(`notify error: ${e}`));
         }, ctx.signal);
+        const finalText = output || "(no output)";
+        // Archive the assistant turn.
+        try { recordMessage(session.id, "assistant", finalText); } catch {}
         if (!receivedChunks) {
           await notifyUpdate(ctx.client, params.sessionId, {
             sessionUpdate: "agent_message_chunk",
-            ...textChunk(messageId, output || "(no output)"),
+            ...textChunk(messageId, finalText),
           });
         }
         return { stopReason: "end_turn", usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
@@ -194,6 +247,7 @@ function createAgent() {
         return { stopReason: "end_turn", usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
       }
     },
+
     async cancel() { return undefined; },
   };
 }
@@ -222,6 +276,7 @@ function runAcp() {
     .onRequest(methods.agent.session.list, (ctx) => h.listSessions(ctx.params))
     .onRequest(methods.agent.session.delete, (ctx) => h.deleteSession(ctx.params))
     .onRequest(methods.agent.session.resume, (ctx) => h.resumeSession(ctx.params))
+    .onRequest(methods.agent.session.fork, (ctx) => h.forkSession(ctx.params))
     .onRequest(methods.agent.session.close, (ctx) => h.closeSession(ctx.params))
     .onRequest(methods.agent.session.setMode, (ctx) => h.setSessionMode(ctx.params))
     .onRequest(methods.agent.session.setConfigOption, (ctx) => h.setSessionConfigOption(ctx.params))
