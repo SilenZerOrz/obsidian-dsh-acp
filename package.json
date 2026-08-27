@@ -15,7 +15,7 @@
     }
   },
   "bin": {
-    "dsh-acp": "./dsh-acp.mjs"
+    "dsh-acp": "dsh-acp.mjs"
   },
   "files": [
     "index.mjs",
