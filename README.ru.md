@@ -22,7 +22,7 @@ dsh --profile headless "<prompt>"
    GUI ACP-клиенты запускают его напрямую как дочерний процесс.
 2. **`index.mjs`** — [cordis][cordis]-плагин, который регистрирует сервис
    `dsh.acp` и управляет процессом адаптера *внутри* harness; используется через
-   `dsh plugin --profile <name> add dsh-acp`.
+   `dsh plugin --profile <name> add obsidian-dsh-acp`.
 
 ## Как это работает
 
@@ -48,7 +48,7 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
 |------|------------|
 | `dsh-acp.mjs` | Автономный бинарник ACP-сервера (`bin: dsh-acp`) |
 | `index.mjs` | Точка входа cordis-плагина (сервис `dsh.acp` + менеджер процесса адаптера) |
-| `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add dsh-acp` |
+| `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
 | `scripts/dsh-acp.js` | Адаптер ACP-сервера (рабочая справочная копия) |
 | `scripts/test-client.js` | Клиентское тестовое окружение ACP для автономной проверки |
 
@@ -94,7 +94,7 @@ node scripts/test-client.js "reply with just the word HELLO"
 Установите в профиль DSH и включите запись:
 
 ```bash
-dsh plugin --profile web add dsh-acp
+dsh plugin --profile web add obsidian-dsh-acp
 ```
 
 Плагин считывает `cordis.patch.yml`, вставляет запись `dsh-acp` в дерево плагинов

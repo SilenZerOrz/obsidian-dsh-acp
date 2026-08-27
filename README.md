@@ -85,8 +85,45 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 | `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
 | `scripts/test-client.js` | ACP client harness for standalone verification |
 | `acp-feature-test.mjs` | Protocol-level feature test (list / fork / resume / archive) |
+| `install.sh` | one-click installer (DSH profile + Obsidian custom agent) |
 | `README.zh-CN.md` | 中文版说明文档 (Chinese) |
 | `README.ru.md` | Документация на русском (Russian) |
+
+## Quick install (one click)
+
+The package ships `install.sh` — a parameterized installer that (a) installs the
+plugin into a DSH profile via the official `dsh plugin add` path and (b) wires
+an Obsidian **Agent Client** custom agent to the ACP server, with optional env
+config. It is **idempotent**, **backs up** every file before touching it,
+supports **any Obsidian vault**, and can be previewed with `--dry-run`.
+
+```bash
+# dry-run preview first (recommended)
+./install.sh --obsidian-vault /path/to/any/vault --dry-run
+
+# real install into the "web" profile + wire Obsidian
+./install.sh --obsidian-vault /path/to/any/vault
+
+# install into another DSH profile
+./install.sh --profile headless --obsidian-vault /path/to/any/vault
+
+# DSH-only (skip Obsidian)
+./install.sh --no-obsidian
+```
+
+Run `./install.sh --help` for every option. Highlights:
+
+| Option | Meaning |
+|--------|---------|
+| `--profile <name>` | DSH profile to install into (default `web`) |
+| `--dsh-home <dir>` | DSH data root (default `$DSH_HOME` or `~/.dsh`) |
+| `--obsidian-vault <dir>` | any Obsidian vault to wire into (supports arbitrary path) |
+| `--package <src>` | plugin source: `<tgz>` / `<npm name>` / `link:<dir>` |
+| `--node-bin <path>` | node binary for the custom agent |
+| `--profile-env` | print recommended adapter env |
+| `--no-obsidian` | skip the Obsidian wiring step |
+| `--dry-run` | preview only, change nothing |
+| `--uninstall` | restore backups and remove config this script added |
 
 ## Standalone usage
 
@@ -99,8 +136,27 @@ node scripts/test-client.js "reply with just the word HELLO"
 
 ### Configuration (Obsidian Agent Client)
 
-Edit `<vault>/.obsidian/plugins/agent-client/data.json` (or use the plugin's
-settings UI) → add a Custom Agent:
+There are two ways to configure the custom agent: **one-click** (run
+`install.sh --obsidian-vault <vault>`, see above) or **manually** as follows.
+
+**Manual steps in Obsidian:**
+
+1. Install the **Agent Client** community plugin (Settings → Community plugins →
+   Browse → search "Agent Client") and enable it.
+2. Open the plugin's settings → **Custom Agents** → **Add**.
+3. Fill in:
+   - **ID**: `dsh-acp`
+   - **Display name**: `DeepSeek Harness (ACP)`
+   - **Command**: the absolute path to this package's `dsh-acp.mjs`
+   - **Args**: *(empty)*
+   - **Env** (optional): e.g.
+     `DSH_ACP_LOG_DIR` → `/absolute/path/to/logs`
+4. Set the plugin's **nodePath** to a real `node` binary (>= 22.13) so the
+   script's shebang resolves.
+5. Reload Obsidian (Cmd-R) and pick *DeepSeek Harness (ACP)* in the agent
+   picker.
+
+If you configure it by editing `data.json` directly:
 
 ```json
 {
@@ -112,27 +168,30 @@ settings UI) → add a Custom Agent:
 }
 ```
 
-Make sure the plugin's **nodePath** points at a real `node` binary so the
-shebang resolves, then reload Obsidian and select *DeepSeek Harness (ACP)* in
-the agent picker.
-
-### Environment
-
-| Variable | Meaning | Default |
-|----------|---------|---------|
-| `DSH_BIN` | `dsh` executable | `dsh` on PATH |
-| `DSH_PROFILE` | profile to boot | `headless` |
-| `DSH_ARGS` | extra args before the prompt (space-separated) | *(none)* |
-| `DSH_ACP_LOG_DIR` | directory for a runtime log | *(disabled)* |
-| `DSH_ACP_STORE_DIR` | directory for the durable session JSON index | `~/.dsh-acp` |
-| `DSH_ACP_ARCHIVE_IN_MAIN` | place turn archives under `sessions/` instead of `dsh-acp-archives/` | `0` |
-
 ## cordis plugin usage
 
-Install into a DSH profile and enable the entry:
+Install into a DSH profile via the official plugin mechanism (this makes the
+plugin installable with `dsh plugin add` thanks to the `dsh.bundle` manifest in
+`package.json`):
 
 ```bash
+# from the npm registry (after publish)
 dsh plugin --profile web add obsidian-dsh-acp
+
+# from a local publish artifact (tarball)
+dsh plugin --profile web add ./obsidian-dsh-acp-0.1.0.tgz
+
+# from a local checkout (symlink, dev mode)
+dsh plugin --profile web add -w link:/path/to/dsh-acp
+```
+
+Verify the plugin is registered in the profile's config tree:
+
+```bash
+dsh --profile web --dump-config | grep -A1 "dsh-acp"
+# -> # == obsidian-dsh-acp
+#    - id: dsh-acp
+#      name: obsidian-dsh-acp
 ```
 
 The plugin reads `cordis.patch.yml` to insert its `dsh-acp` entry into the
@@ -142,6 +201,21 @@ profile's plugin tree, then exposes the `dsh.acp` service:
 - `service.start()` / `service.stop()` — spawn / terminate the adapter
   subprocess.
 - `service.process` — the live `ChildProcess` (null when not running).
+
+### Adapter environment
+
+The spawned `dsh --profile <name>` process reads these environment variables.
+Set them for the adapter (custom-agent `env` in Obsidian, or the profile/managed
+process) as needed:
+
+| Variable | Meaning | Default |
+|----------|---------|---------|
+| `DSH_BIN` | `dsh` executable | `dsh` on PATH |
+| `DSH_PROFILE` | profile to boot | `headless` |
+| `DSH_ARGS` | extra args before the prompt (space-separated) | *(none)* |
+| `DSH_ACP_LOG_DIR` | directory for a runtime log | *(disabled)* |
+| `DSH_ACP_STORE_DIR` | directory for the durable session JSON index | `~/.dsh-acp` |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | place turn archives under `sessions/` instead of `dsh-acp-archives/` | `0` |
 
 Config (loader-provided):
 
