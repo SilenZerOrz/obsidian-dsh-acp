@@ -56,10 +56,48 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 | 路径 | 作用 |
 |------|------|
 | `dsh-acp.mjs` | 独立的 ACP 服务器二进制（`bin: dsh-acp`） |
+| `archive-store.mjs` | 持久会话存储 + DSH 归档写入器 |
 | `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器） |
-| `cordis.patch.yml` | 供 `dsh plugin ... add dsh-acp` 使用的插件插入层 |
+| `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `scripts/dsh-acp.js` | ACP 服务器适配器（运行时参考副本） |
 | `scripts/test-client.js` | 用于独立验证的 ACP 客户端测试工具 |
+| `acp-feature-test.mjs` | 协议层功能测试（list / fork / resume / archive） |
+| `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
+
+## 一键安装
+
+包内附带 `install.sh` —— 一个参数化安装脚本，可以 (a) 通过官方 `dsh plugin add`
+把插件装进 DSH profile，(b) 给 Obsidian **Agent Client** 配置自定义代理，并可选配置
+环境变量。它**幂等**、改任何文件前都会**备份**、支持**任意 Obsidian vault**，并可用
+`--dry-run` 预演。
+
+```bash
+# 先预演（推荐，不改任何东西）
+./install.sh --obsidian-vault /任意/vault/路径 --dry-run
+
+# 正式安装进 "web" profile + 配置 Obsidian
+./install.sh --obsidian-vault /任意/vault/路径
+
+# 装进其它 DSH profile
+./install.sh --profile headless --obsidian-vault /任意/vault/路径
+
+# 只装 DSH，跳过 Obsidian
+./install.sh --no-obsidian
+```
+
+运行 `./install.sh --help` 查看全部选项。要点：
+
+| 选项 | 含义 |
+|------|------|
+| `--profile <name>` | 安装到的 DSH profile（默认 `web`） |
+| `--dsh-home <dir>` | DSH 数据根（默认 `$DSH_HOME` 或 `~/.dsh`） |
+| `--obsidian-vault <dir>` | 任意要配置的 Obsidian vault（支持任意路径） |
+| `--package <src>` | 插件来源：`<tgz>` / `<npm 包名>` / `link:<目录>` |
+| `--node-bin <path>` | 自定义代理使用的 node 二进制 |
+| `--profile-env` | 打印推荐的适配器环境变量 |
+| `--no-obsidian` | 跳过 Obsidian 配置步骤 |
+| `--dry-run` | 只预演，不做任何改动 |
+| `--uninstall` | 恢复备份并移除本脚本添加的配置 |
 
 ## 独立使用
 
@@ -72,8 +110,24 @@ node scripts/test-client.js "reply with just the word HELLO"
 
 ### 配置（Obsidian Agent Client）
 
-编辑 `<vault>/.obsidian/plugins/agent-client/data.json`（或使用插件的设置界面）→
-添加一个自定义代理（Custom Agent）：
+配置自定义代理有两种方式：**一键安装**（运行 `install.sh --obsidian-vault <vault>`，
+见上文）或如下**手动配置**。
+
+**Obsidian 内手动操作步骤：**
+
+1. 安装 **Agent Client** 社区插件（设置 → 第三方插件 → 浏览 → 搜索 "Agent Client"）
+   并启用。
+2. 打开插件设置 → **Custom Agents** → **Add**。
+3. 填写：
+   - **ID**：`dsh-acp`
+   - **Display name**：`DeepSeek Harness (ACP)`
+   - **Command**：本包 `dsh-acp.mjs` 的绝对路径
+   - **Args**：*（空）*
+   - **Env**（可选）：如 `DSH_ACP_LOG_DIR` → `/绝对/路径/到/logs`
+4. 将插件的 **nodePath** 设为真实的 `node` 二进制（>= 22.13），以便 shebang 解析。
+5. 重载 Obsidian（Cmd-R），在代理选择器中选中 *DeepSeek Harness (ACP)*。
+
+如果直接编辑 `data.json`：
 
 ```json
 {
@@ -85,24 +139,29 @@ node scripts/test-client.js "reply with just the word HELLO"
 }
 ```
 
-确保插件的 **nodePath** 指向真实的 `node` 二进制，以便 shebang 能够解析，然后重载
-Obsidian，并在代理选择器中选中 *DeepSeek Harness (ACP)*。
-
-### 环境变量
-
-| 变量 | 含义 | 默认值 |
-|----------|---------|---------|
-| `DSH_BIN` | `dsh` 可执行文件 | PATH 上的 `dsh` |
-| `DSH_PROFILE` | 启动使用的 profile | `headless` |
-| `DSH_ARGS` | 提示词之前附加的参数（空格分隔） | *（无）* |
-| `DSH_ACP_LOG_DIR` | 运行时日志目录 | *（禁用）* |
-
 ## cordis 插件用法
 
-安装进某个 DSH profile 并启用条目：
+通过官方插件机制安装进某个 DSH profile（`package.json` 中的 `dsh.bundle` manifest
+使其可用 `dsh plugin add` 安装）：
 
 ```bash
-dsh plugin --profile web add dsh-acp
+# 从 npm registry（发布后）
+dsh plugin --profile web add obsidian-dsh-acp
+
+# 从本地发布产物（tarball）
+dsh plugin --profile web add ./obsidian-dsh-acp-0.1.0.tgz
+
+# 从本地检出（符号链接，开发模式）
+dsh plugin --profile web add -w link:/path/to/dsh-acp
+```
+
+验证插件注册进 profile 的配置树：
+
+```bash
+dsh --profile web --dump-config | grep -A1 "dsh-acp"
+# -> # == obsidian-dsh-acp
+#    - id: dsh-acp
+#      name: obsidian-dsh-acp
 ```
 
 插件读取 `cordis.patch.yml`，将 `dsh-acp` 条目插入到该 profile 的插件树中，然后暴露
@@ -111,6 +170,20 @@ dsh plugin --profile web add dsh-acp
 - `ctx.get("dsh.acp")` —— `DshAcpService` 实例。
 - `service.start()` / `service.stop()` —— 启动 / 终止适配器子进程。
 - `service.process` —— 存活的 `ChildProcess`（未运行时为 null）。
+
+### 适配器环境变量
+
+被拉起的 `dsh --profile <name>` 进程读取这些环境变量。按需为适配器设置（Obsidian
+custom-agent 的 `env`，或 profile/托管进程）：
+
+| 变量 | 含义 | 默认值 |
+|----------|---------|---------|
+| `DSH_BIN` | `dsh` 可执行文件 | PATH 上的 `dsh` |
+| `DSH_PROFILE` | 启动使用的 profile | `headless` |
+| `DSH_ARGS` | 提示词之前附加的参数（空格分隔） | *（无）* |
+| `DSH_ACP_LOG_DIR` | 运行时日志目录 | *（禁用）* |
+| `DSH_ACP_STORE_DIR` | 持久会话 JSON 索引目录 | `~/.dsh-acp` |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | 将回合归档放到 `sessions/` 而非 `dsh-acp-archives/` | `0` |
 
 配置（由 loader 提供）：
 

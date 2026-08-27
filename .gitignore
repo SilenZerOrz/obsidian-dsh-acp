@@ -14,3 +14,6 @@ tmp-cache/
 
 # Editor
 *.swp
+
+# Publish artifacts
+*.tgz
