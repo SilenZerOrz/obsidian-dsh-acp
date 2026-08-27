@@ -20,3 +20,6 @@ tmp-cache/
 
 # Installer backups
 .install-backups/
+
+# Alternate package-manager lockfiles (project canonical = package-lock.json)
+pnpm-lock.yaml
