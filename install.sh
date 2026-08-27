@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# install.sh — one-click installer for @silenzororz/obsidian-dsh-acp
+# install.sh — one-click installer for obsidian-dsh-acp
 # ============================================================================
-# Installs the obsidian-dsh-acp plugin into a DSH profile (official
-# `dsh plugin add` path) and wires an Obsidian "Agent Client" custom agent to
-# the shipped ACP server, optionally with tuned environment config.
+# Installs the obsidian-dsh-acp plugin into a DSH profile via the official
+# `dsh plugin add` path and wires an Obsidian "Agent Client" custom agent to the
+# ACP server that pnpm installs inside that profile, where its dependencies
+# (e.g. @agentclientprotocol/sdk) are already resolved. No file copying.
 #
 # Safe by default:
 #   - idempotent (rerunning is a no-op when already configured)
@@ -20,11 +21,11 @@
 #   --dsh-home <dir>        DSH data root                    (default: $DSH_HOME or ~/.dsh)
 #   --obsidian-vault <dir>  any Obsidian vault to wire into  (required for Obsidian step)
 #   --package <src>         plugin source: <tgz path> | <npm name> | link:<dir>
-#   --node-bin <path>       node binary to reference in the custom agent
-#   --profile-env           also write recommended env into the DSH profile config
+#   --node-bin <path>       node binary used for the JSON edit + verification
+#   --profile-env           print recommended adapter env
 #   --no-obsidian           skip the Obsidian wiring step
 #   --dry-run               preview only; change nothing
-#   --uninstall             remove what install.sh added and restore backups
+#   --uninstall             restore backups and remove config this script added
 #   --verbose               print extra detail
 #   -h, --help              show this help
 # ============================================================================
@@ -46,6 +47,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${DSH_ACP_BACKUP_DIR:-${SCRIPT_DIR}/.install-backups/${TIMESTAMP}}"
 
+PKG_NAME="obsidian-dsh-acp"
+PLUGIN_ID="dsh-acp"
+ADAPTER_NAME="dsh-acp.mjs"
+
 # ---- helpers --------------------------------------------------------------
 info()  { printf '\033[32m[install]\033[0m %s\n' "$*"; }
 warn()  { printf '\033[33m[install:warning]\033[0m %s\n' "$*" >&2; }
@@ -53,17 +58,14 @@ fail()  { printf '\033[31m[install:error]\033[0m %s\n' "$*" >&2; exit 1; }
 vlog()  { [ "$VERBOSE" = "1" ] && printf '[debug] %s\n' "$*" || true; }
 say()   { [ "$DRY_RUN" = "1" ] && printf '\033[36m[dry-run]\033[0m %s\n' "$*" || info "$*"; }
 
-# use_dry <do_cmd...>: run only if not dry-run
+# use_dry <do_cmd...>: run only if not dry-run (defined before uninstall uses it)
 use_dry() {
-  if [ "$DRY_RUN" = "1" ]; then
-    say "would run: $*"
-    return 0
-  fi
+  if [ "$DRY_RUN" = "1" ]; then say "would run: $*"; return 0; fi
   "$@"
 }
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '1,44p' "$0" | sed 's/^# \{0,1\}//' | sed -n '/Usage:/,$p'
   exit 0
 }
 
@@ -85,140 +87,114 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-(: "${DSH_HOME:?}")
-AUTHORS_NAME="obsidian-dsh-acp"
-PLUGIN_ID="dsh-acp"
-
 # ============================================================================
 # STEP 0 — environment detection & sanity
 # ============================================================================
 echo "──────────────────────────────────────────────────────────────"
-info "obsidian-dsh-acp installer"
-echo "  profile      : ${PROFILE}"
-echo "  dsh-home     : ${DSH_HOME}"
-echo "  obsidian vault: ${OBSIDIAN_VAULT:-<not set>}"
-echo "  package src  : ${PACKAGE_SRC:-<auto>}"
-[ "$DRY_RUN" = "1" ] && echo "  MODE         : DRY-RUN (no changes)"
+info "${PKG_NAME} installer"
+echo "  profile        : ${PROFILE}"
+echo "  dsh-home       : ${DSH_HOME}"
+echo "  obsidian vault : ${OBSIDIAN_VAULT:-<not set>}"
+echo "  package src    : ${PACKAGE_SRC:-<auto>}"
+[ "$DRY_RUN" = "1" ] && echo "  MODE           : DRY-RUN (no changes)"
 
+# ---- uninstall ------------------------------------------------------------
 if [ "$UNINSTALL" = "1" ]; then
   echo ""
   info "UNINSTALL mode"
-  [ -d "$SCRIPT_DIR/.install-backups" ] || fail "no backups found at $SCRIPT_DIR/.install-backups"
-  newest="$(ls -1d "$SCRIPT_DIR/.install-backups"/*/ 2>/dev/null | sort | tail -1)"
-  [ -n "$newest" ] || fail "no backup snapshots to restore from"
+  newest="$(ls -1d "${SCRIPT_DIR}/.install-backups"/*/ 2>/dev/null | sort | tail -1)"
+  [ -n "$newest" ] || fail "no backup snapshot to restore"
   info "restoring snapshot: $newest"
-  # restore obsidian data.json
   for djson in "$newest"/*obsidian-data.json; do
     [ -f "$djson" ] || continue
     target="${djson%.obsidian-data.json}.json"
-    say "restore "$target" from backup"
+    say "restore $target from backup"
     use_dry cp "$djson" "$target"
   done
-  info "uninstall: remove dsh-acp plugin from profile? Re-run without --uninstall if you meant to keep it."
   echo ""
-  info "backups/artifacts remain at $newest (delete manually to fully remove)."
   echo "──────────────────────────────────────────────────────────────"
   exit 0
 fi
 
-# node
+# ---- node -----------------------------------------------------------------
 NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
 if [ -z "${NODE_BIN}" ] || [ ! -x "${NODE_BIN}" ]; then
-  fail "node not found. Pass --node-bin <path> or install Node.js >= 22.13"
+  fail "node not found. Install Node.js >= 22.13 or pass --node-bin <path>."
 fi
 vlog "node: ${NODE_BIN} ($("${NODE_BIN}" -v 2>/dev/null))"
 
-# dsh
+# ---- dsh ------------------------------------------------------------------
 DSH_BIN="${DSH_BIN:-$(command -v dsh || true)}"
-if [ -z "${DSH_BIN}" ] && [ -x "${DSH_HOME}/bin/dsh" ]; then
-  DSH_BIN="${DSH_HOME}/bin/dsh"
-fi
-[ -n "${DSH_BIN}" ] || warn "dsh not found on PATH; will still prepare Obsidian wiring but DSH plugin step is skipped."
-
-# obsidian vault switch
-if [ "$NO_OBSIDIAN" = "1" ]; then
-  OBSIDIAN_VAULT=""
-elif [ -n "${OBSIDIAN_VAULT}" ]; then
-  [ -d "${OBSIDIAN_VAULT}/.obsidian/plugins/agent-client" ] \
-    || warn "vault at '${OBSIDIAN_VAULT}' has no agent-client plugin dir — Configure the Agent Client plugin first."
-fi
+if [ -z "${DSH_BIN}" ] && [ -x "${DSH_HOME}/bin/dsh" ]; then DSH_BIN="${DSH_HOME}/bin/dsh"; fi
+[ -n "${DSH_BIN}" ] || warn "dsh not found on PATH; DSH plugin step will be skipped (Obsidian wiring still attempted)."
 
 # ============================================================================
-# STEP 1 — install plugin into DSH profile (official path)
+# STEP 1 — install the plugin into the DSH profile (official path)
 # ============================================================================
+ADAPTER=""   # absolute path to the installed dsh-acp.mjs (after STEP 1+2)
 if [ -n "${DSH_BIN}" ]; then
   echo ""
   echo "──────────────────────────────────────────────────────────────"
-  info "STEP 1/4 — install plugin into DSH profile '${PROFILE}'"
+  info "STEP 1/3 — install plugin into DSH profile '${PROFILE}'"
 
-  # resolve package source
   PKG_ARG="$PACKAGE_SRC"
   if [ -z "$PKG_ARG" ]; then
-    # auto: prefer a local tarball next to this script, else the local dir, else npm name
-    if [ -f "${SCRIPT_DIR}/${AUTHORS_NAME}-"*.tgz ]; then
-      PKG_ARG="$(ls "${SCRIPT_DIR}"/"${AUTHORS_NAME}"-*.tgz | head -1)"
-      vlog "auto package source: ${PKG_ARG}"
+    if [ -f "${SCRIPT_DIR}/${PKG_NAME}-"*.tgz ]; then
+      PKG_ARG="$(ls "${SCRIPT_DIR}"/"${PKG_NAME}"-*.tgz | head -1)"
     elif [ -f "${SCRIPT_DIR}/package.json" ]; then
       PKG_ARG="link:${SCRIPT_DIR}"
-      vlog "auto package source: ${PKG_ARG} (local checkout)"
     else
-      PKG_ARG="$AUTHORS_NAME"
-      vlog "auto package source: ${PKG_ARG} (npm registry)"
+      PKG_ARG="$PKG_NAME"
     fi
+    vlog "auto package source: ${PKG_ARG}"
   fi
 
   say "dsh plugin --profile '${PROFILE}' add '${PKG_ARG}'"
   if [ "$DRY_RUN" != "1" ] && [ -n "$PKG_ARG" ]; then
     if ! "${DSH_BIN}" plugin --profile "${PROFILE}" add "${PKG_ARG}" 2>&1; then
-      warn "dsh plugin add reported a non-zero exit; continuing to inspect config tree (see ^ error)."
+      warn "dsh plugin add reported non-zero exit; continuing (see error above)."
     fi
   fi
+fi
 
-  # verify registration via dump-config
-  echo ""
-  info "verify plugin registration (dump-config)"
+# ============================================================================
+# STEP 2 — locate the installed adapter (dependencies are already resolved)
+# ============================================================================
+echo ""
+echo "──────────────────────────────────────────────────────────────"
+info "STEP 2/3 — locate installed adapter"
+PROFILE_PKG_DIR="${DSH_HOME}/profiles/${PROFILE}/node_modules/${PKG_NAME}"
+CAND="${PROFILE_PKG_DIR}/${ADAPTER_NAME}"
+
+[ -f "$CAND" ] && ADAPTER="$CAND"
+
+if [ -z "$ADAPTER" ]; then
   if [ "$DRY_RUN" = "1" ]; then
-    say "would verify '${PLUGIN_ID}' present in: dsh --profile '${PROFILE}' --dump-config"
+    say "  (would locate ${CAND})"
+    ADAPTER="$CAND"
   else
-    if "${DSH_BIN}" --profile "${PROFILE}" --dump-config 2>/dev/null | grep -q "${PLUGIN_ID}"; then
-      info "OK: plugin entry '${PLUGIN_ID}' found in profile config tree"
-    else
-      warn "plugin entry '${PLUGIN_ID}' not found in dump-config yet. If you just added it, a profile reload may be needed."
-    fi
+    warn "adapter not found at ${CAND}. Was STEP 1 run? (no 'dsh' found, or package didn't install there)"
   fi
 fi
 
-# ============================================================================
-# STEP 2 — recommended environment config (optional, --profile-env)
-# ============================================================================
-if [ "$WRITE_PROFILE_ENV" = "1" ] && [ -n "${DSH_BIN}" ]; then
-  echo ""
-  echo "──────────────────────────────────────────────────────────────"
-  info "STEP 2/4 — recommended env for the adapter"
-  cat <<ENVEOF
-  Set these for the spawned `dsh --profile ${PROFILE}` process as needed:
-    DSH_BIN               path to the dsh executable  (default: dsh on PATH)
-    DSH_PROFILE           ${PROFILE}
-    DSH_ACP_LOG_DIR       directory for a runtime log (optional)
-    DSH_ACP_STORE_DIR     directory for the session JSON index (default ~/.dsh-acp)
-    DSH_ACP_ARCHIVE_IN_MAIN=1  (optional) place turn archives under sessions/
-ENVEOF
+if [ -n "$ADAPTER" ] && [ -f "$ADAPTER" ]; then
+  if [ ! -x "$ADAPTER" ]; then
+    warn "adapter is not executable: ${ADAPTER}"
+    if [ "$DRY_RUN" != "1" ]; then
+      chmod +x "$ADAPTER" 2>/dev/null && info "  fixed: chmod +x"
+      warn "  Obsidian spawns the command directly (no 'node' prefix), so it must be executable."
+    fi
+  fi
+  info "OK: adapter at ${ADAPTER} ($(ls -l "$ADAPTER" | awk '{print $1}'))"
 fi
 
 # ============================================================================
-# STEP 3 — wire Obsidian Agent Client custom agent
+# STEP 3 — wire Obsidian Agent Client custom agent (points at installed adapter)
 # ============================================================================
 if [ "$NO_OBSIDIAN" != "1" ] && [ -n "${OBSIDIAN_VAULT}" ]; then
   echo ""
   echo "──────────────────────────────────────────────────────────────"
-  info "STEP 3/4 — wire Obsidian custom agent"
-
-  ADAPTER="${SCRIPT_DIR}/dsh-acp.mjs"
-  if [ ! -f "$ADAPTER" ]; then
-    # maybe installed into node_modules earlier
-    ADAPTER="${SCRIPT_DIR}/archive-store.mjs" && ADAPTER="${SCRIPT_DIR%/*}/dsh-acp.mjs"
-  fi
-  [ -f "$ADAPTER" ] || ADAPTER="${PACKAGE_SRC}"
+  info "STEP 3/3 — wire Obsidian custom agent"
 
   target="${OBSIDIAN_VAULT}/.obsidian/plugins/agent-client/data.json"
   [ -f "$target" ] || { warn "data.json not found at $target; Agent Client not installed in this vault yet."; exit 0; }
@@ -232,48 +208,54 @@ if [ "$NO_OBSIDIAN" != "1" ] && [ -n "${OBSIDIAN_VAULT}" ]; then
     vlog "backup -> ${BACKUP_DIR}/$(basename "$target").obsidian-data.json"
   fi
 
-  # Build a small node snippet that updates the customAgents entry.
-  NODE_CMD='const fs=require("fs");const p=process.argv[1];const adapter=process.argv[2];const node=process.argv[3];
+  NODE_CMD='const fs=require("fs");const p=process.argv[1];const adapter=process.argv[2];
 let d=JSON.parse(fs.readFileSync(p,"utf8"));d.customAgents=d.customAgents||[];
-const old=(d.customAgents||[]).findIndex(a=>a.id==="dsh-acp");
-const entry={id:"dsh-acp",displayName:"DeepSeek Harness (ACP)",command:adapter,args:[],env:[],enabled:true};
-if(old>=0){d.customAgents[old]=entry}else{d.customAgents.push(entry)}
-fs.writeFileSync(p,JSON.stringify(d,null,2));console.log("written",p)'
+const i=d.customAgents.findIndex(a=>a&&a.id==="dsh-acp");
+const e={id:"dsh-acp",displayName:"DeepSeek Harness (ACP)",command:adapter,args:[],env:[],enabled:true};
+if(i>=0){d.customAgents[i]=e}else{d.customAgents.push(e)}
+fs.writeFileSync(p,JSON.stringify(d,null,2));console.log("written")'
+
   say "adding/updating customAgents[].{id:'dsh-acp'} command=${ADAPTER}"
   if [ "$DRY_RUN" = "1" ]; then
-    say "  (would update data.json with the custom agent)"
+    say "  (would update data.json)"
   else
-    if ! "${NODE_BIN}" -e "$NODE_CMD" "$target" "$ADAPTER" "$NODE_BIN"; then
-      warn "failed to update ${target}; it was backed up — review manually"
+    if [ -z "$ADAPTER" ]; then
+      warn "no adapter path resolved; not writing Obsidian config (run STEP 1 first)."
     else
-      info "OK: custom agent 'dsh-acp' configured -> ${ADAPTER}"
+      if ! "${NODE_BIN}" -e "$NODE_CMD" "$target" "$ADAPTER"; then
+        warn "failed to update ${target}; it was backed up — review manually"
+      else
+        info "OK: custom agent 'dsh-acp' -> ${ADAPTER}"
+      fi
     fi
   fi
 else
   echo ""
   echo "──────────────────────────────────────────────────────────────"
-  info "STEP 3/4 — Obsidian wiring skipped"
+  info "STEP 3/3 — Obsidian wiring skipped"
   [ "$NO_OBSIDIAN" = "1" ] && info "  (--no-obsidian)" || warn "  (no --obsidian-vault given; pass it to enable)"
 fi
 
 # ============================================================================
-# STEP 4 — summary & next steps
+# Summary
 # ============================================================================
 echo ""
 echo "──────────────────────────────────────────────────────────────"
-info "STEP 4/4 — done"
+info "done"
 if [ "$DRY_RUN" = "1" ]; then
   info "This was a DRY-RUN. Nothing was changed."
 else
   [ -d "$BACKUP_DIR" ] && info "backups: ${BACKUP_DIR}"
 fi
+if [ "${WRITE_PROFILE_ENV}" = "1" ]; then
+  echo "  Recommended env: DSH_BIN / DSH_PROFILE=${PROFILE} / DSH_ACP_LOG_DIR / DSH_ACP_STORE_DIR"
+fi
 cat <<NEXT
   Next steps in Obsidian:
     1. Reload the vault (Cmd-R or restart Obsidian).
-    2. Open the Agent Client plugin and pick the custom agent
-       "DeepSeek Harness (ACP)".
+    2. Open Agent Client and pick "DeepSeek Harness (ACP)".
   DSH:
-    - If the plugin wasn't active yet, restart \`dsh web\` once.
+    - If the plugin wasn't active, restart \`dsh web\` once.
   Re-run ./install.sh any time; it is idempotent.
 NEXT
 echo "──────────────────────────────────────────────────────────────"
