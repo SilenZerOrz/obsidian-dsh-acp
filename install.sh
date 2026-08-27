@@ -149,6 +149,39 @@ if [ -n "${DSH_BIN}" ]; then
     vlog "auto package source: ${PKG_ARG}"
   fi
 
+  # A local-directory source (link:/file:/bare dir) is installed as a symlink;
+  # pnpm does NOT pull in the linked package's own dependencies. If the source
+  # has no node_modules, the adapter's imports (e.g. @agentclientprotocol/sdk)
+  # fail at startup with ERR_MODULE_NOT_FOUND. Install the source deps first.
+  SRC_DIR=""
+  case "$PKG_ARG" in
+    link:*) SRC_DIR="${PKG_ARG#link:}";;
+    file:*) SRC_DIR="${PKG_ARG#file:}";;
+    /*)     SRC_DIR="$PKG_ARG";;
+  esac
+  if [ -n "$SRC_DIR" ] && [ -d "$SRC_DIR" ] && [ -f "$SRC_DIR/package.json" ]; then
+    if [ ! -d "$SRC_DIR/node_modules" ]; then
+      info "  linking local source '$SRC_DIR' — installing its dependencies first"
+      if [ "$DRY_RUN" = "1" ]; then
+        say "  (would run: cd '$SRC_DIR' && pnpm install --no-frozen-lockfile)"
+      else
+        local_installer=""
+        if command -v pnpm >/dev/null 2>&1; then local_installer="pnpm install --no-frozen-lockfile"
+        elif command -v npm  >/dev/null 2>&1; then local_installer="npm install"
+        fi
+        if [ -z "$local_installer" ]; then
+          warn "  neither pnpm nor npm found; cannot preinstall '$SRC_DIR' deps (adapter may not start)"
+        elif ! ( cd "$SRC_DIR" && $local_installer >/dev/null 2>&1 ); then
+          warn "  failed to install deps in '$SRC_DIR' (adapter may not start)"
+        else
+          info "  OK: '$SRC_DIR' deps installed"
+        fi
+      fi
+    else
+      vlog "  source already has node_modules; skipping preinstall"
+    fi
+  fi
+
   say "dsh plugin --profile '${PROFILE}' add '${PKG_ARG}'"
   if [ "$DRY_RUN" != "1" ] && [ -n "$PKG_ARG" ]; then
     if ! "${DSH_BIN}" plugin --profile "${PROFILE}" add "${PKG_ARG}" 2>&1; then
