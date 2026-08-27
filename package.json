@@ -15,6 +15,7 @@
   "files": [
     "index.mjs",
     "dsh-acp.mjs",
+    "archive-store.mjs",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"

@@ -34,7 +34,29 @@ Obsidian Agent Client ──(ACP JSON-RPC over stdin/stdout)──▶ dsh-acp �
 - ACP v1 (newline-delimited JSON-RPC) over the process's stdin/stdout.
 - Streams DSH output back as `agent_message_chunk` updates, then returns a
   `result` (`stopReason: "end_turn"`).
-- Sessions are stateless (each turn is independent); `cwd` is honored.
+- `cwd` is honored; a persistent session layer makes session management usable.
+
+## Session features
+
+Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
+(`archive-store.mjs`) that powers three things:
+
+1. **Reload session list** — `session/list` returns durable sessions from a
+   JSON index on disk (default `~/.dsh-acp/dsh-acp-sessions.json`), so Obsidian's
+   "Session history" reload shows real sessions across adapter restarts. The
+   adapter advertises `sessionCapabilities.list` at initialize.
+2. **Fork a session** — `session/fork` deep-copies a source session's message
+   history into a new session id, records the parent link, and advertises
+   `sessionCapabilities.fork`, so the client's "fork" action works.
+3. **Back up each turn** — every completed turn (user + assistant) is appended
+   to a DSH-shaped event archive at
+   `<DSH_HOME>/dsh-acp-archives/<encoded-cwd>/session-<id>/session.jsonl`.
+   It is kept under `dsh-acp-archives/` (not the web process's `sessions/`)
+   so its plain `.jsonl` never clashes with the main process's zstd-compressed
+   session logs. Set `DSH_ACP_ARCHIVE_IN_MAIN=1` to place it under `sessions/`
+   instead (only if you are running the archive in the same compression mode).
+
+`session/resume` and `session/load` reopen an existing stored session.
 
 ## Requirements
 
@@ -46,10 +68,12 @@ Obsidian Agent Client ──(ACP JSON-RPC over stdin/stdout)──▶ dsh-acp �
 | Path | Role |
 |------|------|
 | `dsh-acp.mjs` | Standalone ACP server binary (`bin: dsh-acp`) |
+| `archive-store.mjs` | Persistent session store + DSH-format archive writer |
 | `index.mjs` | cordis plugin entry (`dsh.acp` service + adapter process manager) |
 | `cordis.patch.yml` | plugin insert layer for `dsh plugin ... add dsh-acp` |
 | `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
 | `scripts/test-client.js` | ACP client harness for standalone verification |
+| `acp-feature-test.mjs` | Protocol-level feature test (list / fork / resume / archive) |
 | `README.zh-CN.md` | 中文版说明文档 (Chinese) |
 | `README.ru.md` | Документация на русском (Russian) |
 
@@ -89,6 +113,8 @@ the agent picker.
 | `DSH_PROFILE` | profile to boot | `headless` |
 | `DSH_ARGS` | extra args before the prompt (space-separated) | *(none)* |
 | `DSH_ACP_LOG_DIR` | directory for a runtime log | *(disabled)* |
+| `DSH_ACP_STORE_DIR` | directory for the durable session JSON index | `~/.dsh-acp` |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | place turn archives under `sessions/` instead of `dsh-acp-archives/` | `0` |
 
 ## cordis plugin usage
 
