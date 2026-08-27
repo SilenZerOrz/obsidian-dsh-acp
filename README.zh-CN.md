@@ -46,6 +46,27 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
   （`stopReason: "end_turn"`）。
 - 会话无状态（每一回合相互独立）；`cwd` 会被保持。
 
+## 会话功能
+
+在"无状态单回合"模型之上，`dsh-acp` 增加了一个持久会话层
+（`archive-store.mjs`），提供三件事：
+
+1. **重新加载会话列表** —— `session/list` 从磁盘上的 JSON 索引（默认
+   `~/.dsh-acp/dsh-acp-sessions.json`）返回持久会话，因此 Obsidian 的
+   "Session history" 重新加载时，即使适配器重启也能看到真实会话。初始化时
+   适配器会声明 `sessionCapabilities.list`。
+2. **会话分支（fork）** —— `session/fork` 把源会话的消息历史深拷贝到一个新的
+   会话 id，记录父级链接，并声明 `sessionCapabilities.fork`，从而让客户端的
+   "fork" 操作生效。
+3. **备份每一回合** —— 每个完成的回合（用户 + 助手）都会追加写入到 DSH 格式的
+   事件归档：
+   `<DSH_HOME>/dsh-acp-archives/<encoded-cwd>/session-<id>/session.jsonl`。
+   它存放在 `dsh-acp-archives/`（而不是 web 进程的 `sessions/`）下，以免普通
+   `.jsonl` 与主进程 zstd 压缩的会话日志冲突。如需改为放进 `sessions/`，可设置
+   `DSH_ACP_ARCHIVE_IN_MAIN=1`（仅当你以相同压缩模式运行归档时）。
+
+`session/resume` 和 `session/load` 可重新打开已保存的会话。
+
 ## 环境要求
 
 - Node.js >= 22.13

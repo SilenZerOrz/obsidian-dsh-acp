@@ -1,30 +1,32 @@
 # obsidian-dsh-acp
 
-`obsidian-dsh-acp` 是一个将 **DeepSeek Harness (DSH)** 接入 **Obsidian** 的
-**ACP (Agent Client Protocol)** 插件/适配器：把它配置为 Obsidian
-**Agent Client** 插件里的一个 *Custom Agent*（或作为 cordis 插件装进 DSH
-profile），就能在 Obsidian 界面里直接通过 ACP 驱动 DSH，用 DeepSeek
-Harness 完成对话与任务，而不需要切出 Obsidian。
+`obsidian-dsh-acp` is an **ACP (Agent Client Protocol)** plugin/adapter that
+bridges **DeepSeek Harness (DSH)** into **Obsidian**. Configure it as a
+*Custom Agent* in Obsidian's **Agent Client** plugin (or install it as a
+cordis plugin in a DSH profile) and you can drive DSH from inside Obsidian —
+running DeepSeek Harness conversations and tasks without ever leaving the app.
 
-这是一个 **ACP server**（通过 stdin/stdout 讲 ACP v1 协议），作用是桥接：
+It is an **ACP server** (speaks ACP v1 over stdin/stdout), standing between
+Obsidian and DSH:
 
 ```text
-Obsidian (Agent Client 插件)
-      │  ① 作为 Custom Agent 通过 ACP 拉起
+Obsidian (Agent Client plugin)
+      │  ① launched as a Custom Agent over ACP
       ▼
 obsidian-dsh-acp (ACP server)
-      │  ② 每次 prompt 拉一个
+      │  ② one prompt per turn
       ▼
-dsh --profile headless "<prompt>"   (DeepSeek Harness 一次性任务)
+dsh --profile headless "<prompt>"   (one-shot DeepSeek Harness task)
 ```
 
-它镜像了 `claude-agent-acp` 包装 Claude Code 的方式。每轮 prompt 会：
-- 拉一次 `dsh --profile headless "<prompt>"`（一次性任务）
-- 把 DSH 输出流式回传为 `agent_message_chunk` 更新
-- 结束时返回 `end_turn` 结果
+It mirrors how `claude-agent-acp` wraps Claude Code. Each prompt turn:
+- spawns a fresh `dsh --profile headless "<prompt>"` (one-shot task)
+- streams DSH output back as `agent_message_chunk` updates
+- returns an `end_turn` result when done
 
-支持会话管理：持久化的会话列表（Obsidian "Session history" 可 reload）、
-`session/fork` 会话分支、以及把每轮对话写回 DSH 归档。
+It also supports session management: a persistent session list (so Obsidian's
+"Session history" can reload real sessions), `session/fork` session branching,
+and mirroring each turn into a DSH archive.
 
 This repository ships two complementary pieces:
 
