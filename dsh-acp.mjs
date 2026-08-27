@@ -38,7 +38,40 @@ import {
 // a minimal environment that usually does NOT include shell PATH additions, so
 // the plugin and the Obsidian custom-agent `env` should set DSH_BIN explicitly.
 // Order: env DSH_BIN -> DSH_ACP_DSH (config file shim) -> "dsh" on PATH.
-const DSH_BIN = process.env.DSH_BIN ?? "dsh";
+//
+// To be robust against a GUI host that lacks shell PATH additions (Obsidian,
+// native apps), we ALSO probe a few well-known install locations when DSH_BIN
+// is unset, instead of relying on the bare "dsh" name resolving on PATH.
+// This fixes "spawn dsh ENOENT" when the adapter runs under a minimal env.
+import { accessSync, constants as fsConstants } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
+
+function detectDshBinary() {
+  // Priority: explicit env wins.
+  if (process.env.DSH_BIN) return process.env.DSH_BIN;
+  if (process.env.DSH_ACP_DSH) return process.env.DSH_ACP_DSH;
+  // Known install locations (most likely first).
+  const candidates = [
+    process.env.DSH_HOME && join(process.env.DSH_HOME, "bin", "dsh"),
+    join(homedir(), ".local", "bin", "dsh"),
+    join(homedir(), ".npm-global", "bin", "dsh"),
+    join("/opt/homebrew", "bin", "dsh"),
+    join("/usr/local", "bin", "dsh"),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    if (isAbsolute(p)) {
+      try {
+        accessSync(p, fsConstants.X_OK);
+        return p;
+      } catch { /* not executable, try next */ }
+    }
+  }
+  // Fall back to bare name (resolved against the process PATH).
+  return "dsh";
+}
+
+const DSH_BIN = detectDshBinary();
 const DSH_PROFILE = process.env.DSH_PROFILE ?? "headless";
 const DSH_EXTRA_ARGS = (process.env.DSH_ARGS ?? "").split(" ").filter(Boolean);
 
