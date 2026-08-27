@@ -15,6 +15,7 @@
 import { Service } from "@deepseek-ai/cordis";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import z from "@deepseek-ai/schemastery";
 
 /**
  * Manages the dsh-acp ACP adapter subprocess for the harness and exposes the
@@ -110,13 +111,17 @@ export class DshAcpService extends Service {
 export const name = "dsh-acp";
 export const inject = [];
 
-/** Config: `{ spawn?, adapterPath?, profile?, env? }`. */
-export const Config = {
-	spawn: { type: "boolean", initial: true },
-	adapterPath: { type: "string", initial: "" },
-	profile: { type: "string", initial: "headless" },
-	env: { type: "object", initial: {} },
-};
+/** Config: `{ spawn?, adapterPath?, profile?, env? }`.
+ * 用 @deepseek-ai/schemastery 的 z.object，cordis 才能识别 `~standard`，
+ * 否则手写 plain object 会让 resolveConfig 访问 Config["~standard"]（undefined）
+ * 触发 "Cannot read properties of undefined (reading 'validate')"。
+ */
+export const Config = z.object({
+	spawn: z.boolean().default(true),
+	adapterPath: z.string().default(""),
+	profile: z.string().default("headless"),
+	env: z.dict(z.any()).default({}),
+});
 
 /**
  * Loader entry: mount the service on the plugin's context.

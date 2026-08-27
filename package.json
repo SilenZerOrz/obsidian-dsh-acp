@@ -9,11 +9,6 @@
     "./dsh-acp": "./dsh-acp.mjs",
     "./package.json": "./package.json"
   },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
   "bin": {
     "dsh-acp": "dsh-acp.mjs"
   },
@@ -31,10 +26,16 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "zod": "^3.25.76"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "keywords": [
     "dsh",
