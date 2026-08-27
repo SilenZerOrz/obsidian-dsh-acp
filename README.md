@@ -1,27 +1,38 @@
-# dsh-acp
+# obsidian-dsh-acp
 
-An [ACP (Agent Client Protocol)][acp] adapter that exposes **DeepSeek Harness
-(DSH)** as an ACP server over stdin/stdout, so ACP clients — Obsidian's
-**Agent Client** plugin, Claude Code clients, editors — can drive DSH through
-the local `dsh` CLI.
+`obsidian-dsh-acp` 是一个将 **DeepSeek Harness (DSH)** 接入 **Obsidian** 的
+**ACP (Agent Client Protocol)** 插件/适配器：把它配置为 Obsidian
+**Agent Client** 插件里的一个 *Custom Agent*（或作为 cordis 插件装进 DSH
+profile），就能在 Obsidian 界面里直接通过 ACP 驱动 DSH，用 DeepSeek
+Harness 完成对话与任务，而不需要切出 Obsidian。
 
-Every prompt turn spawns a fresh
+这是一个 **ACP server**（通过 stdin/stdout 讲 ACP v1 协议），作用是桥接：
 
 ```text
-dsh --profile headless "<prompt>"
+Obsidian (Agent Client 插件)
+      │  ① 作为 Custom Agent 通过 ACP 拉起
+      ▼
+obsidian-dsh-acp (ACP server)
+      │  ② 每次 prompt 拉一个
+      ▼
+dsh --profile headless "<prompt>"   (DeepSeek Harness 一次性任务)
 ```
 
-(a one-shot, stateless task), mirroring how `claude-agent-acp` wraps Claude
-Code. Output is streamed back to the client as `agent_message_chunk` updates,
-then a terminal `end_turn` result is returned.
+它镜像了 `claude-agent-acp` 包装 Claude Code 的方式。每轮 prompt 会：
+- 拉一次 `dsh --profile headless "<prompt>"`（一次性任务）
+- 把 DSH 输出流式回传为 `agent_message_chunk` 更新
+- 结束时返回 `end_turn` 结果
+
+支持会话管理：持久化的会话列表（Obsidian "Session history" 可 reload）、
+`session/fork` 会话分支、以及把每轮对话写回 DSH 归档。
 
 This repository ships two complementary pieces:
 
 1. **`dsh-acp.mjs`** — the standalone ACP server binary (`bin: dsh-acp`).
-   GUI ACP clients spawn this directly as a subprocess.
+   GUI ACP clients (Obsidian Agent Client) spawn this directly as a subprocess.
 2. **`index.mjs`** — a [cordis][cordis] plugin that registers the `dsh.acp`
    service and manages the adapter process *inside* the harness, for use via
-   `dsh plugin --profile <name> add dsh-acp`.
+   `dsh plugin --profile <name> add obsidian-dsh-acp`.
 
 ## How it works
 
@@ -70,7 +81,7 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 | `dsh-acp.mjs` | Standalone ACP server binary (`bin: dsh-acp`) |
 | `archive-store.mjs` | Persistent session store + DSH-format archive writer |
 | `index.mjs` | cordis plugin entry (`dsh.acp` service + adapter process manager) |
-| `cordis.patch.yml` | plugin insert layer for `dsh plugin ... add dsh-acp` |
+| `cordis.patch.yml` | plugin insert layer for `dsh plugin ... add obsidian-dsh-acp` |
 | `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
 | `scripts/test-client.js` | ACP client harness for standalone verification |
 | `acp-feature-test.mjs` | Protocol-level feature test (list / fork / resume / archive) |
@@ -121,7 +132,7 @@ the agent picker.
 Install into a DSH profile and enable the entry:
 
 ```bash
-dsh plugin --profile web add dsh-acp
+dsh plugin --profile web add obsidian-dsh-acp
 ```
 
 The plugin reads `cordis.patch.yml` to insert its `dsh-acp` entry into the
