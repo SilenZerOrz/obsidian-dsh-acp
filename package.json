@@ -34,15 +34,16 @@
     "LICENSE"
   ],
   "scripts": {
-    "start": "node dsh-acp.mjs"
+    "start": "node dsh-acp.mjs",
+    "test": "node acp-feature-test.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
-    "@deepseek-ai/schemastery": "^3.18.1",
-    "zod": "^3.25.76"
+    "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "zod": "^3.25.76"
   },
   "dsh": {
     "bundle": {
