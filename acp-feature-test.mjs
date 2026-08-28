@@ -23,6 +23,13 @@ const workdir = mkdtempSync(join(tmpdir(), "dsh-acp-test-"));
 const storeDir = join(workdir, "store");
 const dshHome = join(workdir, "dshhome");
 
+// Mirror of archive-store.mjs encodeWorkspace() — used to locate on-disk
+// archive dirs for the delete regression check.
+function encodeWorkspaceForTest(cwd) {
+  const cleaned = String(cwd).replace(/^\/+/, "").replace(/[^A-Za-z0-9]/g, "-");
+  return `--${cleaned}--`;
+}
+
 const adapterBin = join(process.cwd(), "dsh-acp.mjs");
 
 let failures = 0;
@@ -124,6 +131,37 @@ await app.connectWith(stream, async (ctx) => {
   } catch {}
   console.log("== archive ==", archived ? "user turn written to DSH_HOME/sessions" : "NOT FOUND");
   check("user message archived under DSH_HOME/sessions", archived);
+
+  // 7. delete: remove on-disk archive dirs AND stop session/list from re-surfacing it
+  // (REQ-01 regression: before the fix, deleteSession dropped only the index record,
+  //  so scanArchives() re-surfaced the "deleted" session on the next list.)
+  let archivalDir = null;
+  try {
+    const indexPath = join(storeDir, "dsh-acp-sessions.json");
+    const json = JSON.parse(readFileSync(indexPath, "utf8"));
+    const rec = json.sessions[s1];
+    const enc = encodeWorkspaceForTest(workdir);
+    for (const rootName of ["dsh-acp-archives", "sessions"]) {
+      const cand = join(dshHome, rootName, enc, rec.archive);
+      if (existsSync(cand)) archivalDir = cand;
+    }
+  } catch {}
+  const hadArchiveDir = !!archivalDir;
+
+  const del = await ctx.request(methods.agent.session.delete, { sessionId: s1 });
+  const gone = archivalDir ? !existsSync(archivalDir) : true;
+  console.log("== delete ==", del.deleted, "archiveDirGone=", gone);
+  check("delete returns the deleted sessionId", del.deleted === s1);
+  check("on-disk archive dir removed after delete", gone);
+  if (hadArchiveDir && !gone) {
+    console.log("    (remnant still exists at " + archivalDir + ")");
+  }
+
+  // list must not re-surface the deleted session (scanArchives no longer finds it)
+  const list3 = await ctx.request(methods.agent.session.list, { cwd: workdir });
+  const ids3 = (list3.sessions || []).map((s) => s.sessionId);
+  console.log("== list after delete ==", ids3.length, "sessions");
+  check("deleted session absent from session/list", !ids3.includes(s1));
 });
 
 await new Promise((r) => setTimeout(r, 300));
