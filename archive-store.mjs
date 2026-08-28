@@ -65,6 +65,16 @@ export function archiveLogPath(cwd, sessionId) {
 // ---- Durable ACP session index ------------------------------------------
 
 let cache = null;
+// Ids recently deleted by THIS process. Kept in memory only, so the
+// write-before-read merge (REQ-04) does not resurrect a session that a
+// concurrent (stale) disk copy still contains.
+const tombstones = new Set();
+
+// Debounce handle for index writes (REQ-02): rapid recordMessage calls are
+// coalesced so we don't full-rewrite the index on every single message.
+let persistTimer = null;
+let persistTimerPending = false;
+const PERSIST_DEBOUNCE_MS = Number(process.env.DSH_ACP_PERSIST_DEBOUNCE_MS ?? 100);
 
 function storeFile() {
   return join(storeRoot(), STORE_FILE_NAME);
@@ -84,15 +94,82 @@ function loadIndex() {
   return cache;
 }
 
-function persistIndex() {
+/**
+ * Re-read the on-disk index and fold in any sessions OTHER processes wrote
+ * (REQ-04 "write-before-read merge"): clear one process's stale cache from
+ * clobbering another's newly created sessions. Sessions we tombstoned in this
+ * process are not resurrected.
+ */
+function mergeDiskSessions() {
+  try {
+    if (!existsSync(storeFile())) return;
+    const disk = JSON.parse(readFileSync(storeFile(), "utf8"));
+    const diskSessions = (disk && disk.sessions) || {};
+    const idx = loadIndex();
+    for (const [sid, rec] of Object.entries(diskSessions)) {
+      if (idx.sessions[sid] || tombstones.has(sid)) continue;
+      // Trust the on-disk copy for sessions created by another process.
+      idx.sessions[sid] = rec;
+    }
+  } catch { /* non-fatal */ }
+}
+
+/**
+ * Write the merged index to disk. When `now` is false this is the debounced
+ * path used by high-frequency recordMessage writes (REQ-02).
+ */
+function persistIndex(now = false) {
+  if (!now) {
+    schedulePersistDebounce();
+    return;
+  }
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+    persistTimerPending = false;
+  }
+  mergeDiskSessions();
   const idx = loadIndex();
   try {
     mkdirSync(storeRoot(), { recursive: true });
-    writeFileSync(storeFile(), JSON.stringify(idx, null, 2), "utf8");
+    // Atomic-ish write: write to a temp file then rename, so a concurrent
+    // reader never sees a truncated/partial JSON mid-write.
+    const tmp = `${storeFile()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(idx, null, 2), "utf8");
+    renameSync(tmp, storeFile());
   } catch (err) {
     // Non-fatal: the adapter keeps running with in-memory state.
     console.warn(`[dsh-acp] cannot persist session index: ${err.message}`);
   }
+}
+
+/** Debounced persist: coalesce repeated recordMessage writes (REQ-02). */
+function schedulePersistDebounce() {
+  if (persistTimer) return; // already scheduled
+  persistTimerPending = true;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistTimerPending = false;
+    persistIndex(true);
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+/** Any write path may mark an id as tombstoned so merges don't resurrect it. */
+function tombstoneSession(sessionId) {
+  tombstones.add(sessionId);
+}
+
+/**
+ * Flush any pending debounced write immediately. Call before process exit so a
+ * just-recorded message is not lost (REQ-02 durability).
+ */
+export function flushPersist() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+    persistTimerPending = false;
+  }
+  if (cache) persistIndex(true);
 }
 
 /** Every known ACP session record. Each record: {id,cwd,title,createdAt,parentSessionId,messages?}. */
@@ -122,9 +199,10 @@ export function createSession({ cwd, title }) {
     parentSessionId: null,
     messages: [],
     archive: archiveSessionId(),
+    archiveSeq: 0,
   };
   idx.sessions[id] = rec;
-  persistIndex();
+  persistIndex(true);
   return rec;
 }
 
@@ -140,9 +218,10 @@ export function ensureSession(sessionId, cwd) {
     parentSessionId: null,
     messages: [],
     archive: `session-${randomUUID()}`,
+    archiveSeq: 0,
   };
   idx.sessions[sessionId] = rec;
-  persistIndex();
+  persistIndex(true);
   return rec;
 }
 
@@ -165,29 +244,41 @@ export function forkSession(sourceSessionId, cwd) {
     parentSessionId: src.id,
     messages: Array.isArray(src.messages) ? src.messages.map((m) => ({ ...m })) : [],
     archive: `session-${randomUUID()}`,
+    // Fresh archive dir, so its event seq starts from 0 (not inherited).
+    archiveSeq: 0,
   };
   idx.sessions[id] = rec;
-  persistIndex();
+  persistIndex(true);
   return rec;
 }
 
-/** Delete a session record from the durable index AND its on-disk archive. */
+/** Delete a session record from the durable index AND its on-disk archives. */
 export function deleteSession(sessionId) {
   const idx = loadIndex();
   const rec = idx.sessions[sessionId];
-  // Also remove the on-disk archive directory. If we only drop the index
-  // record, listSessions() re-surfaces the session via scanArchives() (disk
-  // scan), so Obsidian shows "deleted" but the session reappears on reload.
+  // Also remove the on-disk archives. If we only drop the index record,
+  // listSessionRecords() re-surfaces the session via scanArchives() (which scans
+  // BOTH the dsh-acp archive root and the DSH web official sessions root), so
+  // Obsidian shows "deleted" but the session reappears on reload.
   if (rec && rec.cwd) {
-    const dir = archiveDir(rec.cwd, sessionId);
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch (err) {
-      // Best-effort: index removal still succeeds if disk cleanup fails.
+    // The on-disk archive dir is named after `rec.archive` (session-<uuid>),
+    // NOT the ACP id (`dsh-<uuid>`). archiveDir(cwd, sessionId) would build
+    // a `.../dsh-<uuid>` path that does not exist, so it never removed
+    // anything. Remove both roots that scanArchives() reads:
+    //   1) <DSH_HOME>/dsh-acp-archives/<enc>/<archive>  (adapter-written)
+    //   2) <DSH_HOME>/sessions/<enc>/<archive>          (DSH web official)
+    const enc = encodeWorkspace(rec.cwd);
+    for (const root of [join(dshHome(), "dsh-acp-archives"), join(dshHome(), "sessions")]) {
+      try {
+        rmSync(join(root, enc, rec.archive), { recursive: true, force: true });
+      } catch (err) {
+        // Best-effort: index removal still succeeds if a disk cleanup fails.
+      }
     }
   }
   delete idx.sessions[sessionId];
-  persistIndex();
+  tombstoneSession(sessionId);
+  persistIndex(true);
 }
 
 /** Append one message to a session record and mirror it to the DSH archive. */
@@ -196,12 +287,14 @@ export function recordMessage(sessionId, role, text) {
   const rec = idx.sessions[sessionId];
   if (!rec) return;
   rec.messages.push({ role, text, at: Date.now() });
-  persistIndex();
   try {
+    // Append the archive first so rec.archiveSeq (REQ-03) is up to date before
+    // the index is persisted, keeping seq crash-consistent.
     appendArchiveEvent(rec, role, text);
   } catch (err) {
     console.warn(`[dsh-acp] archive append failed: ${err.message}`);
   }
+  persistIndex();
 }
 
 // ---- DSH-format archive writer (best effort) ----------------------------
@@ -219,7 +312,8 @@ export function appendArchiveEvent(rec, role, text) {
   mkdirSync(join(logPath, ".."), { recursive: true });
 
   const lines = [];
-  if (!existsSync(logPath)) {
+  const firstWrite = !existsSync(logPath);
+  if (firstWrite) {
     const header = {
       type: "session",
       version: 0,
@@ -234,23 +328,40 @@ export function appendArchiveEvent(rec, role, text) {
     lines.push(JSON.stringify(header));
   }
 
-  // seq continues from existing file length (lines already written).
-  let seq = 0;
-  if (existsSync(logPath)) {
-    try {
-      seq = readFileSync(logPath, "utf8").trim().split("\n").length - 1;
-    } catch {
-      seq = 0;
+  // seq is kept in memory (rec.archiveSeq) instead of re-reading the whole
+  // .jsonl and counting lines on every append (REQ-03). For a first write on a
+  // pre-existing file (e.g. a legacy session created before archiveSeq existed,
+  // or an archive written by another process), seed once from the file's
+  // existing events (counts only seq-bearing lines, robust to blank lines).
+  let seq = rec.archiveSeq;
+  if (seq == null) {
+    seq = 0;
+    if (!firstWrite) {
+      try {
+        for (const line of readFileSync(logPath, "utf8").split("\n")) {
+          if (!line) continue;
+          const parsed = JSON.parse(line);
+          if (parsed && typeof parsed.seq === "number") seq = Math.max(seq, parsed.seq + 1);
+        }
+      } catch {
+        seq = 0;
+      }
     }
+  } else if (firstWrite) {
+    // Fresh file: no prior events, nothing to carry over.
+    seq = 0;
   }
 
   const msgId = `acp-${randomUUID()}`;
   const turn = Math.floor(seq / 3) + 1;
 
   const contentBlock = { type: "text", text: String(text ?? "") };
-  const spliceEvent = {
+  // Only the events actually written may consume seq values. Building every
+  // event type unconditionally (as the pre-REQ-03 code did) over-incremented
+  // the counter for user turns, desyncing it from the on-disk line count once
+  // we cached seq in memory.
+  const events = [{
     type: "agent/inbox/spliced",
-    seq: seq++,
     time: Date.now(),
     data: {
       target: "next-turn",
@@ -264,39 +375,29 @@ export function appendArchiveEvent(rec, role, text) {
         },
       ],
     },
-  };
-  const turnStart = {
-    type: "turn/start",
-    seq: seq++,
-    time: Date.now(),
-    data: { turn },
-  };
-  const stepStart = {
-    type: "step/start",
-    seq: seq++,
-    time: Date.now(),
-    data: { turn, step: 1 },
-  };
-  const stepEnd = {
-    type: "step/end",
-    seq: seq++,
-    time: Date.now(),
-    data: { turn, step: 1 },
-  };
-  const turnEnd = {
-    type: "turn/end",
-    seq: seq++,
-    time: Date.now(),
-    data: { turn },
-  };
+  }];
+  if (role === "assistant") {
+    events.push(
+      { type: "step/start", time: Date.now(), data: { turn, step: 1 } },
+      { type: "step/end", time: Date.now(), data: { turn, step: 1 } },
+      { type: "turn/end", time: Date.now(), data: { turn } },
+    );
+  } else {
+    events.push({ type: "turn/start", time: Date.now(), data: { turn } });
+  }
 
-  appendFileSync(logPath, lines
-    .concat([JSON.stringify(spliceEvent)])
-    .concat(role === "assistant"
-      ? [JSON.stringify(stepStart), JSON.stringify(stepEnd), JSON.stringify(turnEnd)]
-      : [JSON.stringify(turnStart)])
-    .concat("\n")
-    .join("\n"));
+  // Assign strictly sequential seq to the events we are about to write.
+  const eventLines = events.map((e) => JSON.stringify({ ...e, seq: seq++ }));
+
+  // Append exactly one line per event, each newline-terminated, so a legacy
+  // reader that counts lines agrees with rec.archiveSeq (no blank lines the
+  // old "<...>\n".join("\n") approach used to leave between appends).
+  const payload = lines.concat(eventLines).map((l) => `${l}\n`).join("");
+  appendFileSync(logPath, payload);
+
+  // Track where the next append's seq starts, so we never re-read the file
+  // (REQ-03). `seq` now equals events written this call + all prior ones.
+  rec.archiveSeq = seq;
 
   return logPath;
 }
@@ -336,9 +437,11 @@ export function scanArchives(cwd) {
       const log = files.find((f) => f === "session.jsonl" || f === "session.jsonl.zstd");
       if (log) {
         try {
-          const first = readFileSync(join(dirPath, log), "utf8")
-            ? JSON.parse(readFileSync(join(dirPath, log), "utf8").split("\n")[0])
-            : {};
+          // Read the file once and reuse it (REQ-12): the old code issued two
+          // readFileSync calls — one truthiness probe, one real read.
+          const raw = readFileSync(join(dirPath, log), "utf8");
+          const firstLine = raw.split("\n")[0];
+          const first = firstLine ? JSON.parse(firstLine) : {};
           if (first.type === "session" && first.id) title = first.id;
         } catch { /* keep dir name */ }
       }
