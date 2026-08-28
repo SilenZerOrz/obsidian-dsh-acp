@@ -132,9 +132,12 @@ function persistIndex(now = false) {
   const idx = loadIndex();
   try {
     mkdirSync(storeRoot(), { recursive: true });
-    // Atomic-ish write: write to a temp file then rename, so a concurrent
-    // reader never sees a truncated/partial JSON mid-write.
-    const tmp = `${storeFile()}.tmp`;
+    // Atomic-ish write: write to a process-unique temp file then rename, so a
+    // concurrent reader never sees a truncated/partial JSON mid-write, AND two
+    // concurrent dsh-acp processes writing the same store don't clobber each
+    // other's temp file (a fixed `.tmp` path caused an ENOENT-on-rename race,
+    // REQ-04). Rename onto the target is atomic regardless of tmp uniqueness.
+    const tmp = `${storeFile()}.tmp.${process.pid}.${randomUUID()}`;
     writeFileSync(tmp, JSON.stringify(idx, null, 2), "utf8");
     renameSync(tmp, storeFile());
   } catch (err) {
