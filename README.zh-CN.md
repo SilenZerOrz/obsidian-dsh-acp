@@ -65,7 +65,11 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
    `.jsonl` 与主进程 zstd 压缩的会话日志冲突。如需改为放进 `sessions/`，可设置
    `DSH_ACP_ARCHIVE_IN_MAIN=1`（仅当你以相同压缩模式运行归档时）。
 
+4. **永久删除会话（v0.1.4）** —— `session/delete` 删除会话记录**并**同时清理磁盘归档目录（`<DSH_HOME>/dsh-acp-archives/` 与 `<DSH_HOME>/sessions/` 双 root，目录名按记录的 `session-<uuid>` 键），因此删除后不会在下次 list"复现"。适配器声明 `sessionCapabilities.delete`。
+
 `session/resume` 和 `session/load` 可重新打开已保存的会话。
+
+> **持久化与并发（v0.1.4）**：内存索引按短防抖（`DSH_ACP_PERSIST_DEBOUNCE_MS`）落盘并在退出前 flush，突发消息合并为少量磁盘写；多个适配器进程共享同一 store 时，写前先合并磁盘副本、且绝不复活已删除记录。完整 REQ 变更见 `docs/计划/开发现状.md`。
 
 ## 环境要求
 
@@ -118,7 +122,7 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 | `--profile-env` | 打印推荐的适配器环境变量 |
 | `--no-obsidian` | 跳过 Obsidian 配置步骤 |
 | `--dry-run` | 只预演，不做任何改动 |
-| `--uninstall` | 恢复备份并移除本脚本添加的配置 |
+| `--uninstall` | 恢复备份 + 卸载 DSH profile 插件（`dsh plugin remove`）+ 移除 Obsidian 本脚本添加的配置 |
 
 ## 独立使用
 
@@ -203,7 +207,10 @@ custom-agent 的 `env`，或 profile/托管进程）：
 | `DSH_PROFILE` | 启动使用的 profile | `headless` |
 | `DSH_ARGS` | 提示词之前附加的参数（空格分隔） | *（无）* |
 | `DSH_ACP_LOG_DIR` | 运行时日志目录 | *（禁用）* |
+| `DSH_ACP_LOG_MAX_BYTES` | 日志轮转的大小上限（字节） | `5242880`（5 MB） |
+| `DSH_ACP_LOG_KEEP` | 保留的轮转 `.1`/`.2`… 日志份数 | `2` |
 | `DSH_ACP_STORE_DIR` | 持久会话 JSON 索引目录 | `~/.dsh-acp` |
+| `DSH_ACP_PERSIST_DEBOUNCE_MS` | 索引合并写的防抖窗口（毫秒） | `100` |
 | `DSH_ACP_ARCHIVE_IN_MAIN` | 将回合归档放到 `sessions/` 而非 `dsh-acp-archives/` | `0` |
 
 配置（由 loader 提供）：

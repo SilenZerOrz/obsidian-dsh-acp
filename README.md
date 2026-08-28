@@ -69,7 +69,21 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
    session logs. Set `DSH_ACP_ARCHIVE_IN_MAIN=1` to place it under `sessions/`
    instead (only if you are running the archive in the same compression mode).
 
+4. **Delete a session permanently (v0.1.4)** — `session/delete` removes the
+   session record **and** the on-disk archive directory under both
+   `<DSH_HOME>/dsh-acp-archives/` and `<DSH_HOME>/sessions/` (the archive dir is
+   named after the record's `session-<uuid>` key), so a deleted session does not
+   "come back" on the next list. The adapter advertises
+   `sessionCapabilities.delete`.
+
 `session/resume` and `session/load` reopen an existing stored session.
+
+> **Durability & concurrency (v0.1.4)**: the in-memory session index is
+> persisted on a short debounce (`DSH_ACP_PERSIST_DEBOUNCE_MS`) and flushed
+> before exit, so bursts of messages coalesce into few disk writes. Concurrent
+> adapter processes sharing one store merge their writes before persisting and
+> never resurrect a deleted record. See `docs/计划/开发现状.md` for the full
+> REQ changelog.
 
 ## Requirements
 
@@ -125,7 +139,7 @@ Run `./install.sh --help` for every option. Highlights:
 | `--profile-env` | print recommended adapter env |
 | `--no-obsidian` | skip the Obsidian wiring step |
 | `--dry-run` | preview only, change nothing |
-| `--uninstall` | restore backups and remove config this script added |
+| `--uninstall` | restore backups, remove the DSH plugin (`dsh plugin remove`) and Obsidian config this script added |
 
 ## Standalone usage
 
@@ -216,7 +230,10 @@ process) as needed:
 | `DSH_PROFILE` | profile to boot | `headless` |
 | `DSH_ARGS` | extra args before the prompt (space-separated) | *(none)* |
 | `DSH_ACP_LOG_DIR` | directory for a runtime log | *(disabled)* |
+| `DSH_ACP_LOG_MAX_BYTES` | size cap (bytes) before the log rotates | `5242880` (5 MB) |
+| `DSH_ACP_LOG_KEEP` | number of rotated `.1`/`.2`… log files to keep | `2` |
 | `DSH_ACP_STORE_DIR` | directory for the durable session JSON index | `~/.dsh-acp` |
+| `DSH_ACP_PERSIST_DEBOUNCE_MS` | debounce window (ms) for coalescing index writes | `100` |
 | `DSH_ACP_ARCHIVE_IN_MAIN` | place turn archives under `sessions/` instead of `dsh-acp-archives/` | `0` |
 
 Config (loader-provided):
