@@ -32,6 +32,9 @@ export class DshAcpService extends Service {
 	constructor(ctx, config = {}) {
 		super(ctx, "dsh.acp");
 		this.config = config;
+		this._stopped = false;
+		this._backoffMs = 0;
+		this._restartTimer = null;
 
 		if (config.spawn !== false) {
 			// Start the adapter once the harness app is ready.
@@ -56,6 +59,8 @@ export class DshAcpService extends Service {
 	 */
 	async start() {
 		if (this.process) return this.process;
+		// A scheduled restart that hasn't fired yet is superseded by a manual start.
+		this.clearRestartTimer();
 		this.abortController?.abort();
 		this.abortController = new AbortController();
 
@@ -83,17 +88,43 @@ export class DshAcpService extends Service {
 			const aborted = this.abortController?.signal.aborted ?? false;
 			this.process = null;
 			this.abortController = null;
-			if (aborted) return; // intentional shutdown / restart
-			this.ctx?.logger?.warn?.(`dsh-acp adapter exited (code=${code} signal=${signal})`);
+			if (aborted || this._stopped) return; // intentional shutdown
+			this.ctx?.logger?.warn?.(`dsh-acp adapter exited unexpectedly (code=${code} signal=${signal}); restarting`);
+			this.scheduleRestart();
 		});
 
 		this.process = child;
+		// It got back up: give the next crash a fresh, low backoff delay.
+		this._backoffMs = BACKOFF_MIN;
 		this.ctx?.logger?.info?.(`dsh-acp adapter started (pid=${child.pid})`);
 		return child;
 	}
 
+	/** Schedule a restart with exponential backoff to avoid a crash loop (REQ-05). */
+	scheduleRestart() {
+		if (this._stopped) return;
+		// First crash: wait BACKOFF_MIN; double each retry up to BACKOFF_MAX.
+		const delay = this._backoffMs || BACKOFF_MIN;
+		this._backoffMs = Math.min(delay * 2, BACKOFF_MAX);
+		this.ctx?.logger?.info?.(`dsh-acp adapter restart in ${delay}ms`);
+		this._restartTimer = setTimeout(() => {
+			this._restartTimer = null;
+			if (this._stopped) return;
+			this.start().catch((err) => this.ctx?.logger?.error?.(String(err)));
+		}, delay);
+	}
+
+	clearRestartTimer() {
+		if (this._restartTimer) {
+			clearTimeout(this._restartTimer);
+			this._restartTimer = null;
+		}
+	}
+
 	/** Stop the adapter if it is running. */
 	async stop() {
+		this._stopped = true;
+		this.clearRestartTimer();
 		this.abortController?.abort();
 		if (this.process) {
 			this.process.kill("SIGTERM");
@@ -106,6 +137,10 @@ export class DshAcpService extends Service {
 		await this.stop();
 	}
 }
+
+// Backoff window for crash-restart (REQ-05).
+const BACKOFF_MIN = 250;
+const BACKOFF_MAX = 30000;
 
 /** Plugin identity and integrated config schema. */
 export const name = "dsh-acp";
@@ -130,12 +165,11 @@ export const Config = z.object({
  */
 export function apply(ctx, config) {
 	// Register the service (constructor calls super(ctx, 'dsh.acp')).
-	const service = new DshAcpService(ctx, config);
-	// Clean up state if the plugin is disabled at runtime.
-	ctx.on("dispose", () => {
-		service.process = null;
-	});
-	return service;
+	// Lifecycle cleanup lives entirely in the constructor's
+	// `ctx.on("dispose", () => this.stop())` — no separate listener here, so
+	// dispose ordering can never null t. process before stop() can SIGTERM it
+	// (REQ-06).
+	return new DshAcpService(ctx, config);
 }
 
 export default {
