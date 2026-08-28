@@ -23,3 +23,7 @@ tmp-cache/
 
 # Alternate package-manager lockfiles (project canonical = package-lock.json)
 pnpm-lock.yaml
+
+# Local-only dev docs (requirements / planning). Kept off git until we decide
+# to commit them ("后续补上传 git"). Tracked only on the developer's machine.
+docs/
