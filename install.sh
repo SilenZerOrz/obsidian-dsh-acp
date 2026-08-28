@@ -102,6 +102,25 @@ echo "  package src    : ${PACKAGE_SRC:-<auto>}"
 if [ "$UNINSTALL" = "1" ]; then
   echo ""
   info "UNINSTALL mode"
+  # STEP 1 uninstall: remove the plugin this script installed into the DSH
+  # profile (REQ-13). STEP 1 of the install path ran
+  # `dsh plugin --profile <name> add <pkg>`; mirror it here so the profile no
+  # longer declares the dsh-acp plugin after uninstall.
+  UDSH_BIN="${DSH_BIN:-$(command -v dsh || true)}"
+  if [ -z "$UDSH_BIN" ] && [ -x "${DSH_HOME}/bin/dsh" ]; then UDSH_BIN="${DSH_HOME}/bin/dsh"; fi
+  if [ -n "$UDSH_BIN" ]; then
+    say "dsh plugin --profile '${PROFILE}' remove '${PKG_NAME}'"
+    if [ "$DRY_RUN" != "1" ]; then
+      if "${UDSH_BIN}" plugin --profile "${PROFILE}" remove "${PKG_NAME}" 2>&1; then
+        info "OK: removed dsh-acp plugin from profile '${PROFILE}'"
+      else
+        warn "dsh plugin remove reported non-zero exit (already removed, or differs by profile)."
+      fi
+    fi
+  else
+    warn "dsh not found; skipping DSH plugin removal (may still be present in profile '${PROFILE}')."
+  fi
+
   newest="$(ls -1d "${SCRIPT_DIR}/.install-backups"/*/ 2>/dev/null | sort | tail -1)"
   [ -n "$newest" ] || fail "no backup snapshot to restore"
   info "restoring snapshot: $newest"
