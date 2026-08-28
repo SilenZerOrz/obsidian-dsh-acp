@@ -22,6 +22,7 @@
 import { agent as acpAgent, methods, ndJsonStream, RequestError } from "@agentclientprotocol/sdk";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { StringDecoder } from "node:string_decoder";
 import {
   allSessions,
   createSession,
@@ -31,6 +32,7 @@ import {
   deleteSession as storeDelete,
   recordMessage,
   scanArchives,
+  flushPersist,
 } from "./archive-store.mjs";
 
 // ---- Configuration -------------------------------------------------------
@@ -84,13 +86,34 @@ function dshBaseArgs() {
 const logDir = process.env.DSH_ACP_LOG_DIR;
 let logFile = null;
 if (logDir) {
-  const { mkdirSync, appendFileSync } = await import("node:fs");
+  const { mkdirSync, appendFileSync, statSync, renameSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
   try {
     mkdirSync(logDir, { recursive: true });
     logFile = join(logDir, "dsh-acp.log");
+    // Size-capped, rolling logs (REQ-10): when dsh-acp.log exceeds
+    // LOG_MAX_BYTES we rotate it to .1 / .2 … (up to LOG_KEEP) and start fresh,
+    // so a long-running adapter never writes a single unbounded file forever.
+    const LOG_MAX_BYTES = Number(process.env.DSH_ACP_LOG_MAX_BYTES ?? 5 * 1024 * 1024);
+    const LOG_KEEP = Number(process.env.DSH_ACP_LOG_KEEP ?? 2);
+
+    function rotateIfNeeded() {
+      let size = 0;
+      try { size = statSync(logFile).size; } catch { return; } // no file yet
+      if (size < LOG_MAX_BYTES) return;
+      // Shift existing rotated files one slot up (.2 -> .3, .1 -> .2), then
+      // move the over-limit file to .1, and finally drop anything beyond
+      // LOG_KEEP (so at most LOG_KEEP rotated files are kept).
+      for (let i = LOG_KEEP; i >= 1; i--) {
+        try { renameSync(`${logFile}.${i}`, `${logFile}.${i + 1}`); } catch { /* slot empty */ }
+      }
+      try { renameSync(logFile, `${logFile}.1`); } catch {}
+      try { rmSync(`${logFile}.${LOG_KEEP + 1}`, { force: true }); } catch {}
+    }
+
     const write = (...args) => {
       try {
+        rotateIfNeeded();
         appendFileSync(logFile, `${new Date().toISOString()} pid=${process.pid} ${args.map(String).join(" ")}\n`);
       } catch {}
     };
@@ -116,6 +139,10 @@ function runDsh(prompt, cwd, onChunk, signal) {
     let out = "";
     let err = "";
     let cancelled = false;
+    // Incremental UTF-8 decoder (REQ-11): decode each chunk with a persistent
+    // StringDecoder so a multi-byte char split across chunk boundaries is not
+    // mangled into garbled text when streamed to the ACP client.
+    const stdoutDecoder = new StringDecoder("utf8");
     if (signal) {
       if (signal.aborted) {
         child.kill("SIGTERM");
@@ -128,7 +155,7 @@ function runDsh(prompt, cwd, onChunk, signal) {
       }
     }
     child.stdout.on("data", (chunk) => {
-      const text = chunk.toString();
+      const text = stdoutDecoder.write(chunk);
       out += text;
       if (onChunk) onChunk(text);
     });
@@ -318,9 +345,10 @@ function runAcp() {
     .onRequest(methods.agent.session.prompt, (ctx) => h.prompt(ctx.params, ctx))
     .onNotification(methods.agent.session.cancel, (ctx) => h.cancel(ctx.params))
     .connect(stream);
-  connection.closed.then(() => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
-  process.on("SIGINT", () => process.exit(0));
+  connection.closed.then(() => { flushPersist(); process.exit(0); });
+  // Flush any debounced index write before exiting (REQ-02 durability).
+  process.on("SIGTERM", () => { flushPersist(); process.exit(0); });
+  process.on("SIGINT", () => { flushPersist(); process.exit(0); });
   process.stdin.resume();
   return connection;
 }
