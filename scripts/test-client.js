@@ -38,9 +38,10 @@ function nodeToWebReadable(nodeStream) {
 
 // Spawn the dsh-acp adapter DIRECTLY as the executable (no `node` prefix),
 // exactly like Obsidian's Agent Client does via the custom-agent `command`.
-// Defaults to the sibling `dsh-acp.js` in this repo; override with DSH_ACP_BIN.
+// Defaults to the repository-root `dsh-acp.mjs` (single implementation source,
+// REQ-07); override with DSH_ACP_BIN.
 const adapterBin =
-  process.env.DSH_ACP_BIN ?? fileURLToPath(new URL("./dsh-acp.js", import.meta.url));
+  process.env.DSH_ACP_BIN ?? fileURLToPath(new URL("../dsh-acp.mjs", import.meta.url));
 const child = spawn(adapterBin, [], {
   cwd: process.cwd(),
   env: { ...process.env },
