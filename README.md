@@ -148,7 +148,25 @@ With the package installed (or directly from a checkout):
 ```bash
 node dsh-acp.mjs            # serve ACP v1 on stdin/stdout
 node scripts/test-client.js "reply with just the word HELLO"
+node dsh-acp.mjs doctor     # health-check + one-click repair hints (v0.1.x experimental)
 ```
+
+### Health check / repair (`doctor`, experimental)
+
+When DSH or Obsidian reports a connection problem ("ACP connection closed",
+"dsh exited 1", `MISSING_CREDENTIAL` …), the adapter auto-injects a **diagnostic
+block with copy-pasteable repair commands** into the ACP reply. You can also run
+a standalone health check:
+
+```bash
+node dsh-acp.mjs doctor            # diagnose + print one-click fix commands
+node dsh-acp.mjs doctor --auto     # attempt auto-fix (each step asks for confirmation first)
+```
+
+`doctor` is **version-agnostic** — it works with both `0.1.1-rc.2` and
+`0.1.2-alpha` of dsh, and only does generic checks (dsh binary, dsh version,
+missing API-key credentials, npm update hint). It never depends on any
+dsh-version-specific internal API.
 
 ### Configuration (Obsidian Agent Client)
 

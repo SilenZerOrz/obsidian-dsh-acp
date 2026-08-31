@@ -299,7 +299,16 @@ function createAgent() {
         return { stopReason: "end_turn", usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
       } catch (err) {
         if (err.message === "cancelled") return { stopReason: "cancelled" };
-        const msg = `\n[dsh-acp error] ${err.message}\n`;
+        let msg = `\n[dsh-acp error] ${err.message}\n`;
+        // 健康诊断注入：dsh 运行失败时，定位可修复问题并给出一键修复指引（版本无关）。
+        // 若用户回复「修复 <序号>」/ 主动运行 doctor，可据此定位与修复。
+        try {
+          const { parseCredentialIssue, formatDiagnosis } = await import("./doctor.mjs");
+          const issue = parseCredentialIssue(err.message);
+          if (issue) {
+            msg += formatDiagnosis([issue]);
+          }
+        } catch (e) { /* 诊断模块失败不影响主流程 */ }
         await notifyUpdate(ctx.client, params.sessionId, {
           sessionUpdate: "agent_message_chunk",
           ...textChunk(messageId, msg),
@@ -372,6 +381,13 @@ function nodeToWebReadable(nodeStream) {
       nodeStream.on("error", (err) => controller.error(err));
     },
   });
+}
+
+// CLI 子命令：doctor（健康诊断 + 可复制修复指引 / --auto 需确认的自动修复）
+// 用法: node dsh-acp.mjs doctor [--auto] | dsh-acp doctor
+if (process.argv[2] === "doctor") {
+  const { runDoctorCli } = await import("./doctor.mjs");
+  runDoctorCli(process.argv.slice(3));
 }
 
 runAcp();
