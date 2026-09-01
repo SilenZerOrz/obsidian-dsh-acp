@@ -146,7 +146,7 @@ export function formatDiagnosis(issues, { pluginUpdateHint = "" } = {}) {
 }
 
 // ---- CLI（doctor 子命令）--------------------------------------------------
-export function runDoctorCli(argv = process.argv.slice(3)) {
+export async function runDoctorCli(argv = process.argv.slice(3)) {
   const doAuto = argv.includes("--auto") || argv.includes("-a");
   console.log(`🩺 obsidian-dsh-acp doctor  (adapter v${ADAPTER_VERSION})`);
   console.log(`   dsh 二进制: ${DSH_BIN}`);
@@ -155,6 +155,48 @@ export function runDoctorCli(argv = process.argv.slice(3)) {
   console.log("");
 
   const issues = diagnoseDsh();
+
+  // —— Obsidian 会话 GC 检测（用户可据此决定纳入范围 / 清理孤儿） ——
+  try {
+    const gc = await import("./gc.mjs");
+    const dirs = gc.detectObsidianSessionsDirs();
+    if (dirs.length === 0) {
+      console.log("📁 [GC] 未检测到 Obsidian agent-client sessions 目录。");
+      console.log("     可设置 DSH_ACP_GC_OBSIDIAN_DIRS=<逗号分隔的 sessions 目录> 显式纳入后自动 GC。");
+    } else {
+      console.log(`📁 [GC] 检测到 ${dirs.length} 个 Obsidian sessions 目录（已被纳入 GC 对账）：`);
+      for (const d of dirs) console.log("        " + d);
+      const report = gc.runGC(dirs); // REPORT_ONLY 模式只报告，不真删
+      const gcEnabled = gc.GC_ENABLED;
+      if (report.removed.length) {
+        console.log(`        ⚠ 发现 ${report.removed.length} 个"Obsidian 已删但 adapter 仍残留"的孤儿会话。`);
+        for (const id of report.removed.slice(0, 12)) console.log("          - " + id);
+        console.log("        Obsidian 每次拉会话列表时会自动清理这些孤儿。");
+        console.log("        现在立即清理：node dsh-acp.mjs doctor --gc");
+      } else {
+        console.log(`        ✅ 无孤儿会话（adapter 索引与 Obsidian 已同步）。GC ${gcEnabled ? "已启用(自动)" : "已关闭(off)"}。`);
+      }
+    }
+  } catch (e) {
+    console.log(`📁 [GC] 检测失败：${e && e.message || e}`);
+  }
+  console.log("");
+
+  // —— GC 立即清理子命令（doctor --gc）—— */
+  if (argv.includes("--gc")) {
+    try {
+      const gc = await import("./gc.mjs");
+      const r = gc.runGC();
+      console.log(`🧹 [GC] 已清理 ${r.removed.length} 个孤儿会话。`);
+      for (const id of r.removed) console.log("   - " + id);
+      console.log(`   剩余 adapter 会话 ${gc.allSessions().length} 个（Obsidian 显示的均保留）。`);
+      console.log(`   提示：也可在 Obsidian 设置 DSH_ACP_GC=off 关闭自动 GC。`);
+      process.exit(0);
+    } catch (e) {
+      console.log(`🧹 [GC] 清理失败：${e && e.message || e}`);
+      process.exit(2);
+    }
+  }
 
   // 补充：跑一次轻量 headless 探测（若非 ENOENT）—— 可选，避免每次耗时
   if (issues.length === 0) {
@@ -173,5 +215,5 @@ export function runDoctorCli(argv = process.argv.slice(3)) {
 
 // 直接以 `dsh-acp doctor` 运行时走 CLI
 if (process.argv[1] && /dsh-acp\.mjs$/.test(process.argv[1]) && process.argv[2] === "doctor") {
-  runDoctorCli();
+  await runDoctorCli();
 }
