@@ -34,6 +34,7 @@ import {
   scanArchives,
   flushPersist,
 } from "./archive-store.mjs";
+import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -233,6 +234,13 @@ function createAgent() {
     },
 
     async listSessions(params) {
+      // Obsidian 会话 GC：以 Obsidian 本地 sessions 目录为权威，把用户已在
+      // Obsidian 删除、但 adapter 仍残留磁盘归档的孤儿会话同步清理掉，避免
+      // session/list 复活。失败不影响列表返回。见 gc.mjs。
+      try {
+        const gc = gcBeforeList();
+        if (gc.removed && gc.removed.length) console.log(`gc: cleaned ${gc.removed.length} orphan session(s)`);
+      } catch (e) { /* 不阻塞列表 */ }
       const cwd = params.cwd ?? process.cwd();
       const sessions = listSessionRecords(cwd).map((s) => ({
         sessionId: s.id,
@@ -384,10 +392,10 @@ function nodeToWebReadable(nodeStream) {
 }
 
 // CLI 子命令：doctor（健康诊断 + 可复制修复指引 / --auto 需确认的自动修复）
-// 用法: node dsh-acp.mjs doctor [--auto] | dsh-acp doctor
+// 用法: node dsh-acp.mjs doctor [--auto] [--gc] | dsh-acp doctor
 if (process.argv[2] === "doctor") {
   const { runDoctorCli } = await import("./doctor.mjs");
-  runDoctorCli(process.argv.slice(3));
+  await runDoctorCli(process.argv.slice(3));
 }
 
 runAcp();

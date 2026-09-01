@@ -168,6 +168,33 @@ node dsh-acp.mjs doctor --auto     # attempt auto-fix (each step asks for confir
 missing API-key credentials, npm update hint). It never depends on any
 dsh-version-specific internal API.
 
+### Session garbage collection (`gc`, automatic)
+
+**Problem:** Obsidian Agent Client's delete button only removes its own local
+`sessions/<id>.json`, and never sends the ACP `session/delete` — so
+obsidian-dsh-acp's own durable index + archives go stale and the session
+"comes back" on the next `session/list`.
+
+**Fix (automatic):** on every `session/list`, the adapter reconciles its durable
+session index against the Obsidian local `agent-client/sessions` directories and
+removes sessions Obsidian no longer tracks (their disk archives included). This
+is conservative — sessions still present in Obsidian are **never** removed.
+
+**Detection / opt-in:**
+```bash
+node dsh-acp.mjs doctor          # shows which Obsidian sessions dirs were detected & orphan count
+node dsh-acp.mjs doctor --gc     # immediately run garbage collection now
+```
+
+**Config env vars:**
+| var | default | meaning |
+|---|---|---|
+| `DSH_ACP_GC` | `on` | `off` disables auto GC |
+| `DSH_ACP_GC_OBSIDIAN_DIRS` | *(auto-detect)* | comma-separated extra `agent-client/sessions` dirs to reconcile |
+| `DSH_ACP_GC_NEED_ARCHIVE` | `0` | when `1`, only remove orphans that still have a disk archive |
+| `DSH_ACP_GC_REPORT_ONLY` | `0` | `1` = dry-run (report only, never delete) |
+| `DSH_ACP_GC_VERBOSE` | `0` | `1` = log GC actions to stderr |
+
 ### Configuration (Obsidian Agent Client)
 
 There are two ways to configure the custom agent: **one-click** (run

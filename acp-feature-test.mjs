@@ -47,7 +47,7 @@ function nodeToWebReadable(s) {
 
 const child = spawn(process.execPath, [adapterBin], {
   cwd: process.cwd(),
-  env: { ...process.env, DSH_BIN: process.env.TEST_DSH_BIN || "echo", DSH_ACP_STORE_DIR: storeDir, DSH_HOME: dshHome, DSH_PROFILE: "headless" },
+  env: { ...process.env, DSH_BIN: process.env.TEST_DSH_BIN || "echo", DSH_ACP_STORE_DIR: storeDir, DSH_HOME: dshHome, DSH_PROFILE: "headless", DSH_ACP_GC: "off" },
   stdio: ["pipe", "pipe", "pipe"],
 });
 child.stderr.on("data", (d) => process.stderr.write("[adapter] " + d));
