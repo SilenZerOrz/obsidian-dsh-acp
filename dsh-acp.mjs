@@ -33,6 +33,7 @@ import {
   recordMessage,
   scanArchives,
   flushPersist,
+  updateSessionMeta,
 } from "./archive-store.mjs";
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 
@@ -46,9 +47,9 @@ import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 // native apps), we ALSO probe a few well-known install locations when DSH_BIN
 // is unset, instead of relying on the bare "dsh" name resolving on PATH.
 // This fixes "spawn dsh ENOENT" when the adapter runs under a minimal env.
-import { accessSync, constants as fsConstants } from "node:fs";
-import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { accessSync, constants as fsConstants, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join, join as joinPath } from "node:path";
 
 function detectDshBinary() {
   // Priority: explicit env wins.
@@ -129,9 +130,36 @@ if (logDir) {
 }
 
 // ---- Running DSH ---------------------------------------------------------
-function runDsh(prompt, cwd, onChunk, signal) {
+// Per-invocation model override via a disposable `--patch` overlay: dsh's patch
+// format lets us re-target `agent-default-model` (provider+model) for THIS
+// process only. The temp patch file is written to the OS temp dir, used by
+// exactly one `dsh --profile headless` invocation, and removed afterwards — so
+// per-session model switching never mutates the user's shared profile settings.
+function modelPatchArgs(model, provider) {
+  const dir = mkdtempSync(joinPath(tmpdir(), "dsh-acp-model-"));
+  const file = joinPath(dir, "model.patch.yml");
+  const prov = provider || "jl-token";
+  writeFileSync(file, [
+    `- id: agent-default-model`,
+    `  name: '@deepseek-ai/dsh-agent-default-model'`,
+    `  config:`,
+    `    provider: ${prov}`,
+    `    model: ${model}`,
+    ``,
+  ].join("\n"));
+  return { file, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
+}
+
+function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
   return new Promise((resolve, reject) => {
     const args = [...dshBaseArgs(), prompt];
+    // When a per-session model is chosen (and differs from the default we
+    // leave to dsh), add a disposable patch overlay that pins agent-default-model.
+    let patchInfo = null;
+    if (modelOverride) {
+      patchInfo = modelPatchArgs(modelOverride);
+      args.splice(args.length - 1, 0, "--patch", patchInfo.file);
+    }
     const child = spawn(DSH_BIN, args, {
       cwd: cwd || process.cwd(),
       env: process.env,
@@ -163,6 +191,7 @@ function runDsh(prompt, cwd, onChunk, signal) {
     child.stderr.on("data", (chunk) => { err += chunk.toString(); });
     child.on("error", (e) => reject(e));
     child.on("close", (code) => {
+      if (patchInfo) patchInfo.cleanup();
       if (cancelled) return reject(new Error("cancelled"));
       if (code === 0) {
         resolve(out.trim());
@@ -190,6 +219,48 @@ const DEFAULTS = {
   }),
 };
 
+// ---- FEAT: per-session model switching (ACP session config option) --------
+// Models offered to Obsidian's configOption dropdown. Defaults mirror the
+// headless profile's llm-pi-ai (jl-token) catalog; override via DSH_ACP_MODELS
+// as comma-separated "id(display)" pairs.
+const DEFAULT_MODELS = [
+  { id: process.env.DSH_ACP_DEFAULT_MODEL || "DeepSeek-V4-Flash" },
+  { id: "Kimi-K2.6" },
+  { id: "gemini-2.5-pro" },
+  { id: "Qwen3.8" },
+];
+function availableModels() {
+  const raw = process.env.DSH_ACP_MODELS;
+  if (raw) {
+    return raw.split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
+      const m = s.match(/^([^(]+)(?:\((.+)\))?$/);
+      return { id: m[1].trim(), name: (m[2] ?? m[1]).trim() };
+    });
+  }
+  return DEFAULT_MODELS.map((m) => ({ id: m.id, name: m.id }));
+}
+
+/** Build the ACP `model` config option (select) for a session. */
+function modelConfigOption(session) {
+  const models = availableModels();
+  const current = session?.model && models.some((m) => m.id === session.model)
+    ? session.model
+    : models[0]?.id;
+  return {
+    id: "model",
+    name: "Model",
+    description: "AI model to use for this session",
+    category: "model",
+    type: "select",
+    currentValue: current,
+    options: models.map((m) => ({ value: m.id, name: m.name })),
+  };
+}
+
+function sessionConfigOptions(session) {
+  return [modelConfigOption(session)];
+}
+
 /** Merge disk-scanned archives with the durable index for session/list. */
 function listSessionRecords(cwd) {
   const indexRecords = allSessions().map((s) => ({
@@ -197,11 +268,59 @@ function listSessionRecords(cwd) {
     title: s.title,
     cwd: s.cwd,
     parentSessionId: s.parentSessionId,
+    summary: s.summary ?? undefined,
+    summaryAt: s.summaryAt ?? undefined,
   }));
   const scanned = scanArchives(cwd).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, parentSessionId: null }));
   // De-dupe by id, index records first.
   const seen = new Set(indexRecords.map((s) => s.id));
   return indexRecords.concat(scanned.filter((s) => !seen.has(s.id)));
+}
+
+// ---- FEAT: session summary (one-line LLM preview) -------------------------
+// Regenerate a session's one-line summary when its message count grows beyond
+// a threshold since the last generation. Runs as a non-blocking background
+// task after a prompt completes; failures are swallowed so they never affect
+// the ACP response.
+const SUMMARY_REFRESH_DELTA = 4;      // regenerate after N new messages
+const SUMMARY_MAX_PROMPT_CHARS = 4000; // cap the messages excerpt sent to the LLM
+const summaryLocks = new Set();       // sessionIds currently generating (avoid races)
+
+function messagesExcerpt(session) {
+  const parts = [];
+  const msgs = Array.isArray(session?.messages) ? session.messages : [];
+  for (const m of msgs.slice(-8)) {
+    const label = m.role === "user" ? "USER" : "AI";
+    const text = String(m.text ?? "").replace(/\s+/g, " ").slice(0, 200);
+    if (text) parts.push(`${label}: ${text}`);
+  }
+  return parts.join("\n").slice(0, SUMMARY_MAX_PROMPT_CHARS);
+}
+
+function shouldRefreshSummary(session) {
+  const msgCount = Array.isArray(session?.messages) ? session.messages.length : 0;
+  // Generate on first meaningful exchange (>=2 messages), then refresh when the
+  // message count has grown by SUMMARY_REFRESH_DELTA since the last summary.
+  if (!session.summary) return msgCount >= 2;
+  return msgCount - (session.summaryAt ? Math.ceil(session.summaryAt) : 0) >= SUMMARY_REFRESH_DELTA;
+}
+
+/** Recompute `rec.summary` via a one-shot dsh invocation (best-effort). */
+async function regenerateSummary(session) {
+  if (!session || summaryLocks.has(session.id)) return;
+  const excerpt = messagesExcerpt(session);
+  if (!excerpt) return;
+  summaryLocks.add(session.id);
+  try {
+    const prompt = "Summarize the following conversation in ONE short sentence (Chinese if the conversation is Chinese, otherwise English). Return ONLY the sentence, no quotes, no prefix.\n\n" + excerpt;
+    const text = await runDsh(prompt, session.cwd, null, undefined, session.model || undefined);
+    const clean = (text || "").trim().slice(0, 300);
+    if (clean) {
+      const msgCount = Array.isArray(session.messages) ? session.messages.length : 0;
+      updateSessionMeta(session.id, { summary: clean, summaryAt: msgCount });
+    }
+  } catch { /* best-effort: a failed summary never fails the session */ }
+  finally { summaryLocks.delete(session.id); }
 }
 
 function createAgent() {
@@ -225,12 +344,12 @@ function createAgent() {
 
     async newSession(params) {
       const rec = createSession({ cwd: params.cwd, title: params._meta?.title });
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async loadSession(params) {
       const rec = ensureSession(params.sessionId, params.cwd);
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async listSessions(params) {
@@ -248,8 +367,26 @@ function createAgent() {
         cwd: s.cwd,
         // Some clients display parent/lineage when present.
         parentSessionId: s.parentSessionId ?? undefined,
+        // FEAT: session summary preview rides in `_meta` — SessionInfo has a
+        // reserved `_meta` object, whereas top-level summary/summaryAt are not
+        // part of the ACP SessionInfo schema and get stripped on serialization.
+        _meta: {
+          summary: s.summary ?? undefined,
+          summaryAt: s.summaryAt ?? undefined,
+        },
       }));
       return { sessions, nextCursor: null };
+    },
+
+    // FEAT: advertise an "import session" command so history pages can render a
+    // button. Obsidian surfaces these via the available_commands_update
+    // session update; the actual import runs on `/import <path>` in prompt.
+    importCmd() {
+      return {
+        name: "import",
+        description: "Import an ACP-protocol (claude / Obsidian) session from a JSON file",
+        input: { type: "unstructured" },
+      };
     },
 
     async deleteSession(params) {
@@ -260,7 +397,7 @@ function createAgent() {
     async resumeSession(params) {
       const rec = getSession(params.sessionId);
       if (!rec) throw new RequestError(`session ${params.sessionId} not found`);
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
+      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async forkSession(params) {
@@ -272,8 +409,18 @@ function createAgent() {
     async closeSession() { return undefined; },
     async setSessionMode() { return undefined; },
     async setSessionConfigOption(params) {
+      // Per-session model override (FEAT). `params.configId === "model"`:
+      // persist the chosen model id onto the session record so prompt() can
+      // apply it. Returns the (possibly updated) configOptions list.
       const session = getSession(params.sessionId);
-      return { configOptions: session?.configOptions ?? [] };
+      if (!session) throw new RequestError(`session ${params.sessionId} not found`);
+      if (params.configId === "model" && typeof params.value === "string") {
+        const valid = availableModels().map((m) => m.id);
+        if (valid.includes(params.value)) {
+          updateSessionMeta(params.sessionId, { model: params.value });
+        }
+      }
+      return { configOptions: sessionConfigOptions(getSession(params.sessionId) ?? session) };
     },
     async authenticate() { return undefined; },
     async logout() { return undefined; },
@@ -282,6 +429,21 @@ function createAgent() {
       const session = getSession(params.sessionId) ?? ensureSession(params.sessionId, params.cwd);
       const cwd = session.cwd ?? process.cwd();
       const promptText = extractPromptText(params.prompt);
+
+      // FEAT: `/import <path>` command → import an external ACP (claude) session
+      // into this session thread. Supports Obsidian's unstructured command input.
+      const importMatch = promptText.trim().match(/^\/import\s+(.+)$/i);
+      if (importMatch) {
+        try {
+          const { importExternalSessionFile } = await import("./import-session.mjs");
+          const r = importExternalSessionFile(importMatch[1], { cwd });
+          const text = `导入成功: 「${r.title}」 ${r.imported} 条消息 (sessionId=${r.sessionId})`;
+          return { stopReason: "end_turn", text, usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
+        } catch (e) {
+          return { stopReason: "end_turn", text: `导入失败: ${e.message}`, usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
+        }
+      }
+
       if (logFile) console.log(`prompt session=${params.sessionId} cwd=${cwd} ${promptText.slice(0, 200)}`);
       const messageId = `msg-${randomUUID()}`;
       let receivedChunks = false;
@@ -294,10 +456,15 @@ function createAgent() {
             sessionUpdate: "agent_message_chunk",
             ...textChunk(messageId, chunk),
           }).catch((e) => console.log(`notify error: ${e}`));
-        }, ctx.signal);
+        }, ctx.signal, session.model || undefined);
         const finalText = output || "(no output)";
         // Archive the assistant turn.
         try { recordMessage(session.id, "assistant", finalText); } catch {}
+        // FEAT: refresh the one-line session summary in the background.
+        try {
+          const srec = getSession(session.id);
+          if (srec && shouldRefreshSummary(srec)) regenerateSummary(srec);
+        } catch { /* best-effort */ }
         if (!receivedChunks) {
           await notifyUpdate(ctx.client, params.sessionId, {
             sessionUpdate: "agent_message_chunk",
@@ -391,11 +558,15 @@ function nodeToWebReadable(nodeStream) {
   });
 }
 
-// CLI 子命令：doctor（健康诊断 + 可复制修复指引 / --auto 需确认的自动修复）
-// 用法: node dsh-acp.mjs doctor [--auto] [--gc] | dsh-acp doctor
+// CLI 子命令：
+//   dsh-acp doctor [--auto] [--gc]  健康诊断 + 修复指引
+//   dsh-acp import <file> [--title '..'] [--cwd /path]  导入外部 ACP (claude) 会话
 if (process.argv[2] === "doctor") {
   const { runDoctorCli } = await import("./doctor.mjs");
   await runDoctorCli(process.argv.slice(3));
+} else if (process.argv[2] === "import") {
+  const { runImportCli } = await import("./import-session.mjs");
+  await runImportCli(process.argv.slice(3));
 }
 
 runAcp();

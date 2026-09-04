@@ -203,6 +203,10 @@ export function createSession({ cwd, title }) {
     messages: [],
     archive: archiveSessionId(),
     archiveSeq: 0,
+    // FEAT: session summary (one-line LLM summary) + current model override.
+    summary: null,
+    summaryAt: null,
+    model: null,
   };
   idx.sessions[id] = rec;
   persistIndex(true);
@@ -222,8 +226,28 @@ export function ensureSession(sessionId, cwd) {
     messages: [],
     archive: `session-${randomUUID()}`,
     archiveSeq: 0,
+    summary: null,
+    summaryAt: null,
+    model: null,
   };
   idx.sessions[sessionId] = rec;
+  persistIndex(true);
+  return rec;
+}
+
+/**
+ * Update settable session metadata (summary / model) and persist.
+ * Only whitelisted keys are written; `updated` is always stamped.
+ * Returns the updated record, or undefined if the session is unknown.
+ */
+export function updateSessionMeta(sessionId, patch = {}) {
+  const idx = loadIndex();
+  const rec = idx.sessions[sessionId];
+  if (!rec) return undefined;
+  if (typeof patch.summary === "string") rec.summary = patch.summary;
+  if (typeof patch.summaryAt === "number") rec.summaryAt = patch.summaryAt;
+  if (typeof patch.model === "string") rec.model = patch.model;
+  rec.updated = Date.now();
   persistIndex(true);
   return rec;
 }

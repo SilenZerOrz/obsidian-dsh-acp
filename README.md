@@ -78,6 +78,48 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 
 `session/resume` and `session/load` reopen an existing stored session.
 
+### Session model switching (v0.1.6)
+
+Each session can carry its own model. The adapter advertises a `model` session
+config option (`SessionConfigSelect`) on `session/new` / `session/load` /
+`session/resume`, so clients like Obsidian render a model dropdown (the same
+mechanism claude uses). `session/set_config_option` persists the chosen model on
+the session record; on the next `prompt` the adapter spawns `dsh --profile
+headless --patch <disposable model overlay>` so only that invocation uses the
+selected model — shared profile settings are never mutated.
+
+Available models default to the headless catalog (`DeepSeek-V4-Flash`,
+`Kimi-K2.6`, `gemini-2.5-pro`, `Qwen3.8`) and can be overridden with
+`DSH_ACP_MODELS` (comma-separated `id(display)` pairs) and
+`DSH_ACP_DEFAULT_MODEL`.
+
+### Session summary preview (v0.1.6)
+
+After each exchange, `dsh-acp` asks the model to write a **one-line summary** of
+the conversation (in the conversation's language) and stores it on the session
+record (`summary` / `summaryAt`). `session/list` returns it to the client under
+`_meta.summary` / `_meta.summaryAt`, so a session-history panel can preview the
+main content of each past conversation. Summaries regenerate after a few new
+messages (debounced); `DSH_ACP_GC=off` is unrelated. Disable summary generation
+is not required — it is best-effort and never blocks the response.
+
+### Import an external ACP session (v0.1.6)
+
+Import a session exported by another ACP agent (e.g. claude / Obsidian Agent
+Client) into the dsh-acp store:
+
+```sh
+node dsh-acp.mjs import <session.json> [--title '..'] [--cwd /path]
+# or, inside an Obsidian dsh-acp session, send the command:
+#   /import /path/to/claude-session.json
+```
+
+It accepts both the claude-agent-acp shape
+(`{ sessionId, messages:[{id,role,content,timestamp}] }`) and dsh-acp's own
+record shape, keeps only `user`/`assistant` turns, and writes them into a fresh
+durable session (including the DSH archive). Imported sessions then appear in
+the client's session list.
+
 > **Durability & concurrency (v0.1.4)**: the in-memory session index is
 > persisted on a short debounce (`DSH_ACP_PERSIST_DEBOUNCE_MS`) and flushed
 > before exit, so bursts of messages coalesce into few disk writes. Concurrent

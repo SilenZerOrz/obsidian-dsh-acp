@@ -29,6 +29,7 @@
     "dsh-acp.mjs",
     "doctor.mjs",
     "gc.mjs",
+    "import-session.mjs",
     "archive-store.mjs",
     "cordis.patch.yml",
     "install.sh",
