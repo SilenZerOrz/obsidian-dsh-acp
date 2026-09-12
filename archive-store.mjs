@@ -247,6 +247,32 @@ export function updateSessionMeta(sessionId, patch = {}) {
   if (typeof patch.summary === "string") rec.summary = patch.summary;
   if (typeof patch.summaryAt === "number") rec.summaryAt = patch.summaryAt;
   if (typeof patch.model === "string") rec.model = patch.model;
+  if (typeof patch.archived === "boolean") rec.archived = patch.archived;
+  if (typeof patch.category === "string") rec.category = patch.category;
+  if (typeof patch.obsidianSessionId === "string") rec.obsidianSessionId = patch.obsidianSessionId;
+  if (typeof patch.obsidianFile === "string") rec.obsidianFile = patch.obsidianFile;
+  rec.updated = Date.now();
+  persistIndex(true);
+  return rec;
+}
+
+/** Move a session to a new cwd: update record + relocate its archive dir. */
+export function moveSession(sessionId, newCwd) {
+  const idx = loadIndex();
+  const rec = idx.sessions[sessionId];
+  if (!rec) return undefined;
+  if (typeof newCwd !== "string" || !newCwd.trim()) return undefined;
+  const oldCwd = rec.cwd;
+  if (oldCwd === newCwd) return rec;
+  // Move the on-disk archive dir from <enc(oldCwd)> to <enc(newCwd)>.
+  const oldDir = archiveDir(oldCwd, rec.archive ?? rec.id);
+  const newDir = archiveDir(newCwd, rec.archive ?? rec.id);
+  if (existsSync(oldDir) && !existsSync(newDir)) {
+    try { mkdirSync(newDir, { recursive: true }); renameSync(oldDir, newDir); } catch (e) {
+      console.warn(`[dsh-acp] move archive for ${sessionId} failed: ${e.message}`);
+    }
+  }
+  rec.cwd = newCwd;
   rec.updated = Date.now();
   persistIndex(true);
   return rec;
