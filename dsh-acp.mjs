@@ -559,14 +559,18 @@ function nodeToWebReadable(nodeStream) {
 }
 
 // CLI 子命令：
-//   dsh-acp doctor [--auto] [--gc]  健康诊断 + 修复指引
-//   dsh-acp import <file> [--title '..'] [--cwd /path]  导入外部 ACP (claude) 会话
+//   dsh-acp doctor [--auto] [--gc]            健康诊断 + 修复指引
+//   dsh-acp import <file> [--title][--cwd]    导入外部 ACP (claude) 会话
+//   dsh-acp manage <list|export|archive|move|import> ...  会话管理
 if (process.argv[2] === "doctor") {
   const { runDoctorCli } = await import("./doctor.mjs");
   await runDoctorCli(process.argv.slice(3));
 } else if (process.argv[2] === "import") {
   const { runImportCli } = await import("./import-session.mjs");
   await runImportCli(process.argv.slice(3));
+} else if (process.argv[2] === "manage") {
+  const { runManageCli } = await import("./session-manage.mjs");
+  await runManageCli(process.argv.slice(3));
 }
 
 runAcp();

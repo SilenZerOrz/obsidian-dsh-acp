@@ -11,11 +11,27 @@
 //
 // Enabled via `dsh plugin --profile <name> add dsh-acp` (see cordis.patch.yml),
 // which inserts the entry defined here into the profile's plugin tree.
+//
+// P1b: 在 web profile 下注入 /api-session/* 路由（前端面板 lib/client.js
+// 经 fetch 调后端，复用 P1a 的 session-manage.mjs / archive-store.mjs）。
+// webServer 是可选 host 服务且晚挂载——apply 期 ctx.get('webServer') 仍为空，
+// 必须经 ctx.inject(['webServer'], ...) 在服务可用时再注册路由；headless /
+// 无 Web 的 profile（CI 冒烟、CLI-only 场景）回调永不执行，ACP adapter 与
+// manage CLI 路径不受影响，插件不因缺服务抛错激活失败。
+//
+// P2 升级：路由同时读 / 写 dsh 原生会话（sp.list / sp.readFrom / agents.create），
+// 让左侧侧栏能看见 Obsidian 导入的会话、可 dsh 接续、共享工具 + preset + 自动压缩。
+// sessionPersistence / agents / workspaceRegistry / sessionProjectionCache / agentPresets
+// / llm / agentDefaultModel 都是可选 host 服务——handler 闭包内通过 ctx.get(...) 延迟
+// 读取；任一缺失时原生路由返回 503（旧 ~/.dsh-acp 路由仍可用），不阻塞 ACP adapter /
+// manage CLI。注册入口把 ctx 一并传给 registerSessionPanelRoutes（handler 需访问 host
+// 服务），与 dsh-chat-import 同样的晚挂载策略。
 
 import { Service } from "@deepseek-ai/cordis";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
+import { registerSessionPanelRoutes } from "./web/session-panel.mjs";
 
 /**
  * Manages the dsh-acp ACP adapter subprocess for the harness and exposes the
@@ -156,6 +172,10 @@ export const Config = z.object({
 	adapterPath: z.string().default(""),
 	profile: z.string().default("headless"),
 	env: z.dict(z.any()).default({}),
+	// P1b 面板：是否向 dsh web 注册 /api-session/* 路由（web profile 默认开，
+	// headless / CI 默认关以避免无谓的 webServer 注入等待）。前端 client.js
+	// 独立：即使 panel 关，前端按钮不会显示（也无 HTTP 路由可调）。
+	enableWebPanel: z.boolean().default(true),
 });
 
 /**
@@ -169,7 +189,25 @@ export function apply(ctx, config) {
 	// `ctx.on("dispose", () => this.stop())` — no separate listener here, so
 	// dispose ordering can never null t. process before stop() can SIGTERM it
 	// (REQ-06).
-	return new DshAcpService(ctx, config);
+	const svc = new DshAcpService(ctx, config);
+
+	// P1b web 面板路由：仅当 enableWebPanel=true 时挂载 /api-session/*（默认开）。
+	// webServer 是可选 host 服务且晚挂载——apply 时 ctx.get('webServer') 仍为空，
+	// 用 ctx.inject(['webServer'], ...) 在服务可用时再注册路由：headless / CI 冒烟
+	//（无 webServer）时回调永不执行，ACP adapter 与 manage CLI 照常可用，apply
+	// 不因缺服务失败（与 dsh-chat-import 同样的晚挂载策略）。P2：把 ctx 一并传给
+	// registerSessionPanelRoutes，让原生路由（dsh-list / dsh-read / obsidian-import）
+	// 通过 ctx.get('sessionPersistence' | 'agents' | ...) 访问 host 服务。
+	if (config.enableWebPanel !== false && typeof ctx.inject === "function") {
+		ctx.inject(["webServer"], (webCtx) => {
+			if (webCtx && webCtx.webServer && typeof webCtx.webServer.register === "function") {
+				registerSessionPanelRoutes(ctx, webCtx.webServer);
+				ctx?.logger?.info?.("[dsh-acp] web 面板路由已注册: /api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}");
+			}
+		});
+	}
+
+	return svc;
 }
 
 export default {

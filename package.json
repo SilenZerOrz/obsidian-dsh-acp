@@ -19,10 +19,11 @@
   "exports": {
     ".": "./index.mjs",
     "./dsh-acp": "./dsh-acp.mjs",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-acp": "dsh-acp.mjs"
+    "dsh-acp": "./dsh-acp.mjs"
   },
   "files": [
     "index.mjs",
@@ -30,7 +31,10 @@
     "doctor.mjs",
     "gc.mjs",
     "import-session.mjs",
+    "session-manage.mjs",
     "archive-store.mjs",
+    "web/session-panel.mjs",
+    "lib/client.js",
     "cordis.patch.yml",
     "install.sh",
     "README.md",
@@ -51,6 +55,12 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale"
+      ],
+      "platform": "web"
     }
   },
   "keywords": [
