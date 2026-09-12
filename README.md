@@ -127,6 +127,37 @@ the client's session list.
 > never resurrect a deleted record. See `docs/计划/开发现状.md` for the full
 > REQ changelog.
 
+### DSH web session panel & Obsidian native import (local, P1b)
+
+Beyond the Obsidian-only adapter, this package also ships a **dsh web session
+management panel** (a cordis web plugin, default `enableWebPanel: true`) and a
+**one-click Obsidian import that writes DSH-native sessions** (visible in the
+dsh conversation list on the left, resumable, sharing tools/preset). It follows
+the same plugin surface as `dsh-chat-import`.
+
+- **Panel** (`lib/client.js`, `web/session-panel.mjs`): a sidebar
+  `sidebar.footer.action` button opens a slide-out panel with three tabs —
+  **Sessions** (own `~/.dsh-acp` store: list / export / archive / move),
+  **DSH Native** (lists the dsh session store via `sessionPersistence`),
+  and **Obsidian Import** (discover + one-click import of Obsidian Agent Client
+  sessions).
+- **DSH-native integration** (`web/obsidian-import.mjs`): discovers the Obsidian
+  `agent-client/sessions/*.json` in your vaults (`DSH_ACP_OBSIDIAN_DIRS` to
+  override), and imports each into the **dsh native session store** — writing
+  via `sessionPersistence` (SessionHandle: `create(header)` → `append` →
+  `flush` → `close`), synthesizing DSH `session` events (`assistant/message`
+  carries the settlement `stream`), and attaching to a workspace so the session
+  appears in the dsh conversation list and can be resumed.
+- **dsh 0.1.5 compatible**: session format V3 (`SESSION_FORMAT_VERSION = 3`),
+  `sessionPersistence` SessionHandle model, `sp.open('read').read()` for the
+  read/preview route, and snapshot-normalized `sp.list()`.
+- HTTP routes registered under `/api-session/*`: `list`, `export`, `archive`,
+  `move`, `dsh-list`, `dsh-read`, `obsidian-list`, `obsidian-import`. The panel
+  endpoints read the dsh host services via `ctx.get('sessionPersistence' |
+  'agents' | 'sessionProjectionCache' | ...)`, unavailable → 503, legacy
+  `~/.dsh-acp` routes still work.
+
+
 ## Requirements
 
 - Node.js >= 22.13
@@ -143,6 +174,10 @@ the client's session list.
 | `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
 | `scripts/test-client.js` | ACP client harness for standalone verification |
 | `acp-feature-test.mjs` | Protocol-level feature test (list / fork / resume / archive) |
+| `session-manage.mjs` | P1b session management core (export / archive / move workspace / list) |
+| `web/session-panel.mjs` | dsh web panel backend: `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` routes |
+| `web/obsidian-import.mjs` | Discover + one-click import of Obsidian Agent Client sessions → dsh native store (SessionHandle, V3) |
+| `lib/client.js` | dsh web panel frontend (React): sidebar button + Sessions / DSH Native / Obsidian Import tabs |
 | `install.sh` | one-click installer (DSH profile + Obsidian custom agent) |
 | `README.zh-CN.md` | 中文版说明文档 (Chinese) |
 | `README.ru.md` | Документация на русском (Russian) |
