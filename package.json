@@ -33,7 +33,7 @@
     "import-session.mjs",
     "session-manage.mjs",
     "archive-store.mjs",
-    "web/session-panel.mjs",
+    "web/",
     "lib/client.js",
     "cordis.patch.yml",
     "install.sh",
