@@ -195,6 +195,9 @@ export function synthesizeDshEvents({ sessionId, title, turns, createdAt, provid
       push("assistant/message", {
         turn: turnIdx,
         step: 1,
+        // 0.1.5 要求 assistant/message 携带 settlement stream（数组）；缺则 agents.create 拒绝
+        // （"invalid settlement fields"）。stream 是 assistant 的流式内容块。
+        stream: [{ type: "text", text: t.response }],
         message: {
           id: `import:obsidian:${sessionId}:a${turnIdx}`,
           role: "assistant",
@@ -273,8 +276,7 @@ async function createDshSession(ctx, meta, events) {
       return { via: "agents.create", presetId: presetId ?? null };
     } catch (err) {
       errors.push(`agents.create: ${String((err && err.message) || err)}`);
-      // 临时诊断：打印 agents.create 具体失败，定位下会话投影 offset 问题的根因
-      // 不静默：继续走 sp 回退分支
+      // 临时诊断：打印 agents.create 具体失败 + 前 6 个事件类型/seq，定位 0.1.5 拒绝点
     }
   }
 
