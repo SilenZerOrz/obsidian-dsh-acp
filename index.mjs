@@ -172,10 +172,12 @@ export const Config = z.object({
 	adapterPath: z.string().default(""),
 	profile: z.string().default("headless"),
 	env: z.dict(z.any()).default({}),
-	// P1b 面板：是否向 dsh web 注册 /api-session/* 路由（web profile 默认开，
-	// headless / CI 默认关以避免无谓的 webServer 注入等待）。前端 client.js
-	// 独立：即使 panel 关，前端按钮不会显示（也无 HTTP 路由可调）。
-	enableWebPanel: z.boolean().default(true),
+	// P1b 面板：是否向 dsh web 注册 /api-session/* 路由。
+	// v0.2.1 起 **默认关闭**（npm 发布版不展示 dsh web UI 面板；前端 client.js 不在
+	// files 列表）。后端路由文件（web/session-panel.mjs 等）保留，仍可通过
+	// `dsh.client.web` 显式传入 `enableWebPanel: true` 启用（仅作开发/测试用，
+	// 不会进入 npm 包的 UI 表面）。headless / CI 无 webServer 时默认行为不变。
+	enableWebPanel: z.boolean().default(false),
 });
 
 /**
