@@ -157,6 +157,32 @@ the same plugin surface as `dsh-chat-import`.
   'agents' | 'sessionProjectionCache' | ...)`, unavailable → 503, legacy
   `~/.dsh-acp` routes still work.
 
+#### Screenshots (Observance usage)
+
+Three screenshots of the plugin in action inside Obsidian Agent Client:
+
+1. **Agent settings** — `DeepSeek Harness (ACP)` registered as a custom agent
+   (plus model picker `DeepSeek-V4-Flash`), live in the Obsidian settings.
+
+   ![Agent settings](assets/screenshots/obsidian-agent-client-settings.png)
+
+2. **Run a conversation** — right-pane `DeepSeek Harness (ACP)` chat with the
+   capabilities overview and an `@Home` note mention.
+
+   ![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+3. **Session history** — the Session history dialog listing DSH sessions
+   (resume / fork / delete actions per row).
+
+   ![Session history](assets/screenshots/obsidian-agent-client-session-history.png)
+
+> These are the same images referenced by [`screenshots.json`](screenshots.json)
+> for the [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
+> / dsh-market listing (App Store-style gallery). Images are GitHub-hosted and
+> read directly from this repository; they are intentionally **not** part of the
+> npm tarball (`files` whitelist).
+
+
 
 ## Requirements
 
