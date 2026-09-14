@@ -235,14 +235,21 @@ export const Config = z.object({
 	// `dsh.client.web` 显式传入 `enableWebPanel: true` 启用（仅作开发/测试用，
 	// 不会进入 npm 包的 UI 表面）。headless / CI 无 webServer 时默认行为不变。
 	enableWebPanel: z.boolean().default(false),
-	// P2 long-runtime config.
+	// P2 long-runtime config. NOTE: schemastery 用 `z.const(value)` 表达字面量
+	// （没有 z.enum / z.literal），`z.union([z.const(...), ...])` 表达枚举。
+	// 错误用例会抛 "z.enum is not a function" / "z.literal is not a function"。
 	runtime: z.object({
-		mode: z.enum(["long", "spawn"]).default("spawn"),
+		mode: z.union([z.const("long"), z.const("spawn")]).default("spawn"),
 		spawnFallback: z.boolean().default(true),
 	}).default({}),
-	// P2 permission gate config.
+	// P2 permission gate config. 同上 schemastery 用 z.union([z.const(...), ...])。
 	permission: z.object({
-		mode: z.enum(["default", "acceptEdits", "dontAsk", "bypassPermissions"]).default("default"),
+		mode: z.union([
+			z.const("default"),
+			z.const("acceptEdits"),
+			z.const("dontAsk"),
+			z.const("bypassPermissions"),
+		]).default("default"),
 		timeoutMs: z.number().default(300000),
 		editTools: z.array(z.string()).default(["Edit", "Write", "MultiEdit", "NotebookEdit"]),
 	}).default({}),
