@@ -441,8 +441,11 @@ function createAgent() {
         globalThis.__DSH_LONG_RUNTIME__?._initialized
       ) {
         const rt = globalThis.__DSH_LONG_RUNTIME__;
-        // Temporarily swap acpClient so this turn's emits hit ctx.notify.
+        // Temporarily swap acpClient so this turn's emits hit ctx.notify, and
+        // expose the live ACP client (with .request for session/request_permission)
+        // so the permission gate can ask the user when needed.
         const previousClient = rt.acpClient;
+        const previousLive = rt._liveAcpClient;
         rt.acpClient = {
           async notify(method, p) {
             if (method !== "session/update" || !ctx?.client) return;
@@ -453,6 +456,9 @@ function createAgent() {
             }
           },
         };
+        rt._liveAcpClient = ctx?.client
+          ? { request: (m, p) => ctx.client.request(m, p) }
+          : null;
         try {
           const result = await rt.prompt({
             sessionId: params.sessionId,
@@ -465,6 +471,7 @@ function createAgent() {
           };
         } finally {
           rt.acpClient = previousClient;
+          rt._liveAcpClient = previousLive;
         }
       }
 
