@@ -46,6 +46,54 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
   （`stopReason: "end_turn"`）。
 - 会话无状态（每一回合相互独立）；`cwd` 会被保持。
 
+## 双 runtime 架构（v0.2.2+ / P2 长驻改造骨架）
+
+为了在 Obsidian 端实现**工具审批弹窗**和**思考/执行过程实时显示**，adapter
+需要从「每轮 spawn headless 子进程」切换到「**双 runtime 分发**」：
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  入口 A：dsh-acp.mjs 独立二进制（Obsidian Agent Client 拉起）       │
+│  · 无 cordis ctx，runtime.mode 永远 = "spawn"（向后兼容）          │
+│  · 走 v0.2.1 现有路径：spawn dsh --profile headless               │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  入口 B：index.mjs cordis 插件（dsh web 加载）                     │
+│  · 与 dsh 同进程，runtime.mode 默认 = "long"                       │
+│  · long 模式：in-process import lib/long-runtime.mjs              │
+│  · 订阅 ctx.llm.stream() chunks → ACP sessionUpdate               │
+│  · headless profile 自动降级 spawn（保护现有 headless 用户）       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**当前状态（v0.2.2 / P1.0 骨架）**：long 模式已可被 cordis 插件在
+in-process 启动，但接入点先 throw P1.0 placeholder，等待 P1.5 接入
+`ctx.llm.stream()`、P2.0 接入 4-mode 审批、P2.5 接入 temperature / reasoningEffort。
+spawn 路径 100% 不变。
+
+**模式解析优先级**（`lib/runtime-switch.mjs::resolveRuntimeMode()`）：
+
+1. `DSH_PROFILE=headless` → 强制 spawn（headless 用户不变）
+2. `DSH_ACP_RUNTIME_MODE=long|spawn` 显式覆盖
+3. `DSH_IN_CORDIS=1` → long（cordis 插件 in-process 标记）
+4. 默认 spawn（standalone binary 向后兼容）
+
+配置示例：
+
+```bash
+# 强制 long 模式（cordis 插件内）
+DSH_ACP_RUNTIME_MODE=long node dsh-acp.mjs
+
+# long 初始化失败时回退 spawn（默认开启）
+DSH_ACP_SPAWN_FALLBACK=true DSH_ACP_RUNTIME_MODE=long node dsh-acp.mjs
+
+# 4 种 permission 模式（默认 "default"，最安全）
+DSH_ACP_PERMISSION_MODE=acceptEdits    # 或 dontAsk / bypassPermissions
+DSH_ACP_PERMISSION_TIMEOUT_MS=300000   # 5min 超时默认 reject
+DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
+```
+
 ## 会话功能
 
 在"无状态单回合"模型之上，`dsh-acp` 增加了一个持久会话层
@@ -80,13 +128,16 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 
 | 路径 | 作用 |
 |------|------|
-| `dsh-acp.mjs` | 独立的 ACP 服务器二进制（`bin: dsh-acp`） |
+| `dsh-acp.mjs` | 独立的 ACP 服务器二进制（`bin: dsh-acp`，双 runtime 分发入口） |
 | `archive-store.mjs` | 持久会话存储 + DSH 归档写入器 |
-| `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器） |
+| `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器；long 模式 in-process host） |
+| `lib/runtime-switch.mjs` | 双 runtime mode 解析 + 4-mode permission config + tryLongFallbackSpawn |
+| `lib/long-runtime.mjs` | long 模式 LongRuntime class（v0.2.2 占位；P1.5+ 接入 ctx.llm.stream） |
+| `lib/client.js` | dsh web React 面板（**0.2.1 默认隐藏** npm `files`，仅 test 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `scripts/dsh-acp.js` | ACP 服务器适配器（运行时参考副本） |
 | `scripts/test-client.js` | 用于独立验证的 ACP 客户端测试工具 |
-| `acp-feature-test.mjs` | 协议层功能测试（list / fork / resume / archive） |
+| `acp-feature-test.mjs` | 协议层功能测试（list / fork / resume / archive；`--runtime long|spawn`） |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
 
 ## 一键安装
