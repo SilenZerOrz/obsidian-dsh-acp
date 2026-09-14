@@ -431,6 +431,43 @@ function createAgent() {
       const cwd = session.cwd ?? process.cwd();
       const promptText = extractPromptText(params.prompt);
 
+      // P1.5 step 4: long-mode + mock-llm protocol test path. If long-runtime
+      // is initialized (init() succeeded) AND mock-llm env is set, route the
+      // turn through rt.prompt() with an acpClient wrapper that bridges
+      // session/update notifications to ctx.notify. Real (non-mock) long mode
+      // lands in P3.0 once ctx.llm.stream is exercised against real dsh.
+      if (
+        process.env.DSH_ACP_MOCK_LLM === "1" &&
+        globalThis.__DSH_LONG_RUNTIME__?._initialized
+      ) {
+        const rt = globalThis.__DSH_LONG_RUNTIME__;
+        // Temporarily swap acpClient so this turn's emits hit ctx.notify.
+        const previousClient = rt.acpClient;
+        rt.acpClient = {
+          async notify(method, p) {
+            if (method !== "session/update" || !ctx?.client) return;
+            try {
+              await ctx.client.notify(methods.client.session.update, p);
+            } catch (e) {
+              process.stderr.write(`[dsh-acp] long→ctx notify failed: ${e?.message ?? e}\n`);
+            }
+          },
+        };
+        try {
+          const result = await rt.prompt({
+            sessionId: params.sessionId,
+            prompt: params.prompt,
+            sessionConfig: { model: session.model ?? undefined },
+          });
+          return {
+            stopReason: result.stopReason,
+            usage: result.usage ?? { totalTokens: 0, inputTokens: 0, outputTokens: 0 },
+          };
+        } finally {
+          rt.acpClient = previousClient;
+        }
+      }
+
       // FEAT: `/import <path>` command → import an external ACP (claude) session
       // into this session thread. Supports Obsidian's unstructured command input.
       const importMatch = promptText.trim().match(/^\/import\s+(.+)$/i);
@@ -508,6 +545,119 @@ function extractPromptText(prompt) {
   return String(prompt ?? "");
 }
 
+/**
+ * Install a mock cordis ctx whose `llm.stream()` returns a scriptable async
+ * iterable of StreamChunks. Used by acp-feature-test.mjs --mock-llm to exercise
+ * the long-runtime init() path end-to-end without a real dsh process.
+ *
+ * Chunk script: read from DSH_ACP_MOCK_LLM_CHUNKS (JSON array, env var) or
+ * fall back to a canned "hello world" sequence.
+ *
+ * @returns {Promise<object>} mock cordis ctx (shaped like dsh's: { llm, on, off })
+ */
+async function installMockCordisCtx() {
+  const chunks = parseMockChunksEnv();
+  return {
+    llm: {
+      stream(_options) {
+        return (async function* () {
+          for (const c of chunks) {
+            if (_options && _options.signal && _options.signal.aborted) {
+              throw new Error("aborted");
+            }
+            yield c;
+          }
+        })();
+      },
+    },
+    on() {},
+    off() {},
+  };
+}
+
+function parseMockChunksEnv() {
+  const raw = process.env.DSH_ACP_MOCK_LLM_CHUNKS;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    } catch (e) {
+      process.stderr.write(`[dsh-acp] mock-llm: bad DSH_ACP_MOCK_LLM_CHUNKS JSON (${e.message}); using default\n`);
+    }
+  }
+  // Default: a reasoning + text + usage + finish canned stream.
+  return [
+    { type: "block-start", index: 0, blockType: "reasoning" },
+    { type: "reasoning-delta", index: 0, text: "thinking…" },
+    { type: "block-end", index: 0, block: { type: "reasoning", text: "thinking…" } },
+    { type: "block-start", index: 1, blockType: "text" },
+    { type: "text-delta", index: 1, text: "mock-long: hello " },
+    { type: "text-delta", index: 1, text: "world" },
+    { type: "block-end", index: 1, block: { type: "text", text: "mock-long: hello world" } },
+    { type: "usage", usage: { inputTokens: 5, outputTokens: 7, totalTokens: 12 } },
+    { type: "finish", reason: { kind: "stop" } },
+  ];
+}
+
+// ---- FEAT (P2.0): dual-runtime dispatch ----------------------------------
+// Resolves runtime.mode at startup. Long mode requires a dsh cordis ctx
+// accessible via globalThis.__DSH_CORDIS_CTX__ (set by the cordis plugin when
+// hosting in-process). The standalone binary never has this, so it falls back
+// to spawn mode.
+//
+// P1.5 step 4: DSH_ACP_MOCK_LLM=1 installs a fake cordis ctx so protocol tests
+// can exercise the long path end-to-end without a real dsh process.
+//
+// All dispatch logs go to stderr — stdout is reserved for ACP JSON-RPC.
+async function runAcpDualMode() {
+  const mode = resolveRuntimeMode();
+  const permissionConfig = resolvePermissionConfig();
+  process.stderr.write(`[dsh-acp] runtime mode: ${mode} permission.mode=${permissionConfig.mode}\n`);
+
+  if (mode === "spawn") return runAcp();
+
+  // Long mode: requires cordis ctx injected by the cordis plugin.
+  // P1.5 step 4: --mock-llm flag installs a fake ctx so protocol tests can
+  // exercise the long path end-to-end without a real dsh process.
+  let cordisCtx = globalThis.__DSH_CORDIS_CTX__;
+  if (!cordisCtx && process.env.DSH_ACP_MOCK_LLM === "1") {
+    cordisCtx = await installMockCordisCtx();
+    process.stderr.write("[dsh-acp] mock-llm: installed fake cordis ctx (test mode)\n");
+  }
+  if (!cordisCtx) {
+    process.stderr.write("[dsh-acp] long mode requested but no cordis ctx available; falling back to spawn\n");
+    return runAcp();
+  }
+
+  // Lazy import so standalone binary never pays the cost.
+  const { getLongRuntime } = await import("./lib/long-runtime.mjs");
+  const rt = getLongRuntime();
+  try {
+    // P1.5: init() now succeeds. acpClient is a stub here; the prompt()
+    // handler in createAgent() swaps in a ctx-forwarding wrapper when
+    // DSH_ACP_MOCK_LLM=1 is set. P2.0 will add ctx.on('approval/request') +
+    // agent/pre-step wiring here.
+    await rt.init({
+      cordisCtx,
+      acpClient: { notify: async () => {} },
+      permissionConfig,
+      cwd: process.cwd(),
+      model: process.env.DSH_ACP_DEFAULT_MODEL ?? process.env.DSH_ACP_DEFAULT_MODEL_FOR_TEST ?? "default/test-model",
+    });
+    // Stash the runtime on globalThis so the ACP prompt handler can route
+    // long-mode turns through it.
+    globalThis.__DSH_LONG_RUNTIME__ = rt;
+    process.stderr.write("[dsh-acp] long mode init succeeded (P1.5)\n");
+    return runAcp();
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    process.stderr.write(`[dsh-acp] long mode init failed: ${msg}\n`);
+    const fallback = (process.env.DSH_ACP_SPAWN_FALLBACK ?? "true") !== "false";
+    if (!fallback) throw err;
+    return runAcp();
+  }
+}
+
 // ---- Wiring --------------------------------------------------------------
 function runAcp() {
   const input = nodeToWebWritable(process.stdout);
@@ -536,46 +686,6 @@ function runAcp() {
   process.on("SIGINT", () => { flushPersist(); process.exit(0); });
   process.stdin.resume();
   return connection;
-}
-
-// ---- FEAT (P2.0): dual-runtime dispatch ----------------------------------
-// Resolves runtime.mode at startup. Long mode requires a dsh cordis ctx
-// accessible via globalThis.__DSH_CORDIS_CTX__ (set by the cordis plugin when
-// hosting in-process). The standalone binary never has this, so it falls back
-// to spawn mode. P1.0: long-mode init() throws a placeholder error so callers
-// see a clear "not yet implemented" message and the spawn fallback kicks in.
-//
-// All dispatch logs go to stderr — stdout is reserved for ACP JSON-RPC.
-async function runAcpDualMode() {
-  const mode = resolveRuntimeMode();
-  const permissionConfig = resolvePermissionConfig();
-  process.stderr.write(`[dsh-acp] runtime mode: ${mode} permission.mode=${permissionConfig.mode}\n`);
-
-  if (mode === "spawn") return runAcp();
-
-  // Long mode: requires cordis ctx injected by the cordis plugin.
-  const cordisCtx = globalThis.__DSH_CORDIS_CTX__;
-  if (!cordisCtx) {
-    process.stderr.write("[dsh-acp] long mode requested but no cordis ctx available; falling back to spawn\n");
-    return runAcp();
-  }
-
-  // Lazy import so standalone binary never pays the cost.
-  const { getLongRuntime } = await import("./lib/long-runtime.mjs");
-  const rt = getLongRuntime();
-  try {
-    await rt.init({ cordisCtx, acpClient: null, permissionConfig, cwd: process.cwd() });
-    // P1.0: init() throws a placeholder; if it somehow returns we have no
-    // prompt bridge yet, so fall back.
-    process.stderr.write("[dsh-acp] long mode init returned without error (unexpected in P1.0); falling back to spawn\n");
-    return runAcp();
-  } catch (err) {
-    const msg = err && err.message ? err.message : String(err);
-    process.stderr.write(`[dsh-acp] long mode init failed: ${msg}\n`);
-    const fallback = (process.env.DSH_ACP_SPAWN_FALLBACK ?? "true") !== "false";
-    if (!fallback) throw err;
-    return runAcp();
-  }
 }
 
 function nodeToWebWritable(nodeStream) {

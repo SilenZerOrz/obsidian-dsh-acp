@@ -24,28 +24,43 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // CLI: --runtime spawn|long  (default: spawn, backward-compatible)
-function parseRuntimeFlag(argv) {
+// CLI: --mock-llm           (long mode with fake cordis ctx, no real dsh)
+function parseFlags(argv) {
   const idx = argv.indexOf("--runtime");
-  if (idx === -1) return "spawn";
-  const v = argv[idx + 1];
-  if (v !== "spawn" && v !== "long") {
-    console.error(`Unknown --runtime value: ${v}; expected spawn|long`);
+  let runtimeMode = "spawn";
+  if (idx !== -1) {
+    const v = argv[idx + 1];
+    if (v !== "spawn" && v !== "long") {
+      console.error(`Unknown --runtime value: ${v}; expected spawn|long`);
+      process.exit(2);
+    }
+    runtimeMode = v;
+  }
+  const mockLlm = argv.includes("--mock-llm");
+  if (mockLlm && runtimeMode !== "long") {
+    console.error("--mock-llm requires --runtime long");
     process.exit(2);
   }
-  return v;
+  return { runtimeMode, mockLlm };
 }
-const runtimeMode = parseRuntimeFlag(process.argv.slice(2));
+const { runtimeMode, mockLlm } = parseFlags(process.argv.slice(2));
 
 const workdir = mkdtempSync(join(tmpdir(), "dsh-acp-test-"));
 const storeDir = join(workdir, "store");
 const dshHome = join(workdir, "dshhome");
 
-// Mirror of archive-store.mjs encodeWorkspace() — used to locate on-disk
-// archive dirs for the delete regression check.
-function encodeWorkspaceForTest(cwd) {
-  const cleaned = String(cwd).replace(/^\/+/, "").replace(/[^A-Za-z0-9]/g, "-");
-  return `--${cleaned}--`;
-}
+const app = client({ name: "dsh-acp-feature-test" });
+const outputs = [];
+app.onNotification(methods.client.session.update, (ctx) => {
+  const u = ctx.params.update;
+  // For --mock-llm: collect ALL sessionUpdate types (thought + text + tool + usage)
+  // so we can prove the long bridge emits the full stream shape, not just text.
+  if (mockLlm) {
+    outputs.push(u);
+  } else if (u.sessionUpdate === "agent_message_chunk") {
+    outputs.push(u.content.text);
+  }
+});
 
 const adapterBin = join(process.cwd(), "dsh-acp.mjs");
 
@@ -76,18 +91,15 @@ const child = spawn(process.execPath, [adapterBin], {
     // P1.0: spawn fallback is on by default; long-mode init throws placeholder
     // so the adapter falls back to spawn and the protocol-layer test still runs.
     DSH_ACP_SPAWN_FALLBACK: "true",
+    // P1.5 step 4: --mock-llm installs a fake cordis ctx that returns a
+    // canned StreamChunk sequence. Used to exercise the long path end-to-end.
+    ...(mockLlm ? { DSH_ACP_MOCK_LLM: "1", DSH_ACP_DEFAULT_MODEL_FOR_TEST: "default/test-model" } : {}),
   },
   stdio: ["pipe", "pipe", "pipe"],
 });
 child.stderr.on("data", (d) => process.stderr.write("[adapter] " + d));
 
 const stream = ndJsonStream(nodeToWebWritable(child.stdin), nodeToWebReadable(child.stdout));
-const app = client({ name: "dsh-acp-feature-test" });
-const outputs = [];
-app.onNotification(methods.client.session.update, (ctx) => {
-  const u = ctx.params.update;
-  if (u.sessionUpdate === "agent_message_chunk") outputs.push(u.content.text);
-});
 
 await app.connectWith(stream, async (ctx) => {
   console.log(`== runtime mode requested: ${runtimeMode} (headless profile will force spawn when no cordis ctx) ==`);
@@ -117,6 +129,29 @@ await app.connectWith(stream, async (ctx) => {
   // 6. prompt round-trips and archives
   outputs.length = 0;
   const pr = await ctx.request(methods.agent.session.prompt, { sessionId: s1, prompt: [{ type: "text", text: "hello from test" }] });
+  if (mockLlm) {
+    // --mock-llm path: outputs holds full sessionUpdate objects emitted by
+    // long-runtime's LLMStreamBridge. Verify we saw reasoning + text + usage.
+    const types = outputs.map((u) => u.sessionUpdate);
+    console.log("== prompt (long+mock-llm) ==", JSON.stringify(types), "stopReason=", pr.stopReason);
+    check("long runtime emitted agent_thought_chunk", types.includes("agent_thought_chunk"));
+    check("long runtime emitted agent_message_chunk", types.includes("agent_message_chunk"));
+    check("long runtime emitted usage_update", types.includes("usage_update"));
+    const thoughtUpdates = outputs.filter((u) => u.sessionUpdate === "agent_thought_chunk");
+    const thoughtText = thoughtUpdates.map((u) => u.content?.text ?? "").join("");
+    check("thought chunk carries the canned reasoning text", thoughtText.includes("thinking"));
+    // The streamed text-chunks include init="" + 2 deltas + 1 block-end snapshot.
+    // The snapshot is authoritative (it contains "mock-long: " prefix that the
+    // mock chunks only emit at block-end, not in the deltas). So we check the
+    // final assembled text == prompt result.text, and that it equals the
+    // expected canned message.
+    const textUpdates = outputs.filter((u) => u.sessionUpdate === "agent_message_chunk");
+    const finalSnapshot = textUpdates[textUpdates.length - 1]?.content?.text ?? "";
+    check("final text block carries the canned message", finalSnapshot === "mock-long: hello world");
+    check("prompt ended end_turn", pr.stopReason === "end_turn");
+    // Skip archive/delete checks below: --mock-llm doesn't exercise archive paths.
+    return;
+  }
   const joined = outputs.join("");
   console.log("== prompt ==", JSON.stringify(joined), "stopReason=", pr.stopReason);
   check("prompt produced echo output", joined.length > 0);
