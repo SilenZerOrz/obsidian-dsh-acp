@@ -51,11 +51,23 @@ export class DshAcpService extends Service {
 		this._stopped = false;
 		this._backoffMs = 0;
 		this._restartTimer = null;
+		this._longRt = null;
+
+		// headless profile MUST stay spawn — long mode requires cordis ctx,
+		// which the cordis plugin already has, but a headless profile is meant
+		// for stateless CLI usage where spawning is the only safe default.
+		if (config.profile === "headless" && config.runtime?.mode === "long") {
+			ctx.logger?.warn?.("[dsh-acp] runtime.mode='long' is incompatible with profile='headless'; forcing 'spawn'");
+			config = { ...config, runtime: { ...(config.runtime || {}), mode: "spawn" } };
+			this.config = config;
+		}
 
 		if (config.spawn !== false) {
 			// Start the adapter once the harness app is ready.
 			ctx.on("app/ready", () => {
-				this.start().catch((err) => this.ctx?.logger?.error?.(String(err)));
+				const useLong = config.runtime?.mode === "long";
+				const boot = useLong ? this.startLong() : this.start();
+				boot.catch((err) => this.ctx?.logger?.error?.(String(err)));
 			});
 		}
 
@@ -72,6 +84,10 @@ export class DshAcpService extends Service {
 	/**
 	 * Spawn the dsh-acp adapter as a child of this harness process.
 	 * Returns the ChildProcess, or the existing one if already running.
+	 *
+	 * P2 long-mode: when `runtime.mode === "long"` the cordis plugin hosts the
+	 * long-runtime IN-PROCESS (no child spawn) so it can access dsh's cordis
+	 * ctx directly. For long mode, the caller should use `startLong()` instead.
 	 */
 	async start() {
 		if (this.process) return this.process;
@@ -92,6 +108,13 @@ export class DshAcpService extends Service {
 				...process.env,
 				DSH_BIN: dshBin,
 				DSH_PROFILE: this.config.profile ?? process.env.DSH_PROFILE ?? "headless",
+				// Tell the child which runtime mode to use (it reads
+				// DSH_ACP_RUNTIME_MODE via lib/runtime-switch.mjs).
+				DSH_ACP_RUNTIME_MODE: this.config.runtime?.mode === "long" ? "spawn" : "spawn",
+				DSH_ACP_SPAWN_FALLBACK: this.config.runtime?.spawnFallback === false ? "false" : "true",
+				DSH_ACP_PERMISSION_MODE: this.config.permission?.mode ?? "default",
+				DSH_ACP_PERMISSION_TIMEOUT_MS: String(this.config.permission?.timeoutMs ?? 300000),
+				DSH_ACP_PERMISSION_EDIT_TOOLS: (this.config.permission?.editTools ?? ["Edit", "Write", "MultiEdit", "NotebookEdit"]).join(","),
 				...this.config.env,
 			},
 			signal: this.abortController.signal,
@@ -114,6 +137,29 @@ export class DshAcpService extends Service {
 		this._backoffMs = BACKOFF_MIN;
 		this.ctx?.logger?.info?.(`dsh-acp adapter started (pid=${child.pid})`);
 		return child;
+	}
+
+	/**
+	 * P2 long mode: host long-runtime IN-PROCESS so it can directly access
+	 * the harness's cordis ctx (ctx.llm / ctx.agents / ctx.sessionPersistence).
+	 * No child spawn, no IPC. P1.0: throws a placeholder error from the
+	 * long-runtime's init(); P1.5 will wire ctx.llm.stream and agent events.
+	 *
+	 * Returns the singleton LongRuntime instance on success.
+	 */
+	async startLong() {
+		if (this._longRt) return this._longRt;
+		const { getLongRuntime } = await import("./lib/long-runtime.mjs");
+		const { resolvePermissionConfig } = await import("./lib/runtime-switch.mjs");
+		const rt = getLongRuntime();
+		await rt.init({
+			cordisCtx: this.ctx,
+			acpClient: null, // wired in P2.5+ when long path serves ACP traffic
+			permissionConfig: resolvePermissionConfig(),
+			cwd: process.cwd(),
+		});
+		this._longRt = rt;
+		return rt;
 	}
 
 	/** Schedule a restart with exponential backoff to avoid a crash loop (REQ-05). */
@@ -146,6 +192,10 @@ export class DshAcpService extends Service {
 			this.process.kill("SIGTERM");
 			this.process = null;
 		}
+		if (this._longRt) {
+			try { await this._longRt.dispose(); } catch { /* ignore */ }
+			this._longRt = null;
+		}
 	}
 
 	/** Dispose: stop the adapter before the owning fiber is torn down. */
@@ -162,10 +212,17 @@ const BACKOFF_MAX = 30000;
 export const name = "dsh-acp";
 export const inject = [];
 
-/** Config: `{ spawn?, adapterPath?, profile?, env? }`.
+/** Config: `{ spawn?, adapterPath?, profile?, env?, runtime?, permission?, enableWebPanel? }`.
  * 用 @deepseek-ai/schemastery 的 z.object，cordis 才能识别 `~standard`，
  * 否则手写 plain object 会让 resolveConfig 访问 Config["~standard"]（undefined）
  * 触发 "Cannot read properties of undefined (reading 'validate')"。
+ *
+ * P2 additions:
+ *   - `runtime.mode` — "long" (in-process) or "spawn" (child dsh-acp.mjs). Default "spawn"
+ *     to keep the current behavior; long mode is opt-in via Config or env.
+ *   - `runtime.spawnFallback` — if true (default), long init failure falls back to spawn.
+ *   - `permission.{mode,timeoutMs,editTools}` — 4-mode permission gate; consumed by
+ *     both the cordis plugin (long) and the spawned adapter (env-mirrored).
  */
 export const Config = z.object({
 	spawn: z.boolean().default(true),
@@ -178,6 +235,17 @@ export const Config = z.object({
 	// `dsh.client.web` 显式传入 `enableWebPanel: true` 启用（仅作开发/测试用，
 	// 不会进入 npm 包的 UI 表面）。headless / CI 无 webServer 时默认行为不变。
 	enableWebPanel: z.boolean().default(false),
+	// P2 long-runtime config.
+	runtime: z.object({
+		mode: z.enum(["long", "spawn"]).default("spawn"),
+		spawnFallback: z.boolean().default(true),
+	}).default({}),
+	// P2 permission gate config.
+	permission: z.object({
+		mode: z.enum(["default", "acceptEdits", "dontAsk", "bypassPermissions"]).default("default"),
+		timeoutMs: z.number().default(300000),
+		editTools: z.array(z.string()).default(["Edit", "Write", "MultiEdit", "NotebookEdit"]),
+	}).default({}),
 });
 
 /**
