@@ -433,3 +433,231 @@ test("resetLongRuntime: clears the singleton", () => {
   const b = getLongRuntime();
   assert.notEqual(a, b);
 });
+
+// --- P2.0 step 2: agent/pre-step + approval/request hooks ---------------
+
+test("init: registers agent/pre-step listener on cordis ctx", async () => {
+  const ctx = fakeCtx([]);
+  const registered = [];
+  ctx.on = (event, listener) => { registered.push({ event, listener }); };
+  const rt = new LongRuntime();
+  await rt.init({ cordisCtx: ctx, acpClient: fakeClient(), model: "default/m" });
+  const events = registered.map((r) => r.event);
+  assert.ok(events.includes("agent/pre-step"), "must subscribe to pre-step");
+  assert.ok(events.includes("approval/request"), "must subscribe to approval/request");
+});
+
+test("init: stores PermissionGate on instance", async () => {
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: fakeCtx([]),
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "bypassPermissions", timeoutMs: 1000, editTools: ["Edit"] },
+    model: "default/m",
+  });
+  assert.ok(rt.gate, "gate must be created");
+  assert.equal(rt.gate.mode, "bypassPermissions");
+});
+
+test("agent/pre-step: pushes tool_call_update (status=pending) via acpClient", async () => {
+  const ctx = fakeCtx([]);
+  const client = fakeClient();
+  const rt = new LongRuntime();
+  await rt.init({ cordisCtx: ctx, acpClient: client, model: "default/m" });
+
+  // Find the pre-step listener and invoke it directly.
+  const preStep = ctx._lastListeners?.["agent/pre-step"]?.[0]?.listener;
+  // fakeCtx's on() above is no-op, so re-register through the ctx shape we used.
+  // Re-run via the listeners array we stored on init:
+  const stored = rt._agentListeners.find((l) => l.event === "agent/pre-step");
+  assert.ok(stored, "pre-step listener must be stored for dispose()");
+  await stored.listener({
+    toolCallId: "tc-pre-1",
+    toolName: "Edit",
+    sessionId: "sess-1",
+  });
+
+  const paramsList = client.sent
+    .filter((s) => s.method === "session/update")
+    .map((s) => s.params);
+  const pending = paramsList.find((p) => p.update?.toolCallId === "tc-pre-1");
+  assert.ok(pending, "expected a tool_call_update with tc-pre-1");
+  assert.equal(pending.update.status, "pending");
+  assert.equal(pending.update.title, "Edit");
+  assert.equal(pending.sessionId, "sess-1");
+});
+
+test("approval/request: bypassPermissions auto-allows (no acpRequester call)", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "bypassPermissions", timeoutMs: 1000, editTools: [] },
+    model: "default/m",
+  });
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  const replies = { acceptCalled: false, rejectCalled: false };
+  await stored.listener(
+    { toolCallId: "tc-1", toolName: "bash", args: { cmd: "ls" } },
+    {
+      accept: () => { replies.acceptCalled = true; },
+      reject: (r) => { replies.rejectCalled = true; replies.rejectReason = r; },
+    },
+  );
+  assert.equal(replies.acceptCalled, true);
+  assert.equal(replies.rejectCalled, false);
+});
+
+test("approval/request: dontAsk auto-allows without surfacing UI", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "dontAsk", timeoutMs: 1000, editTools: [] },
+    model: "default/m",
+  });
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  let resolved = null;
+  await stored.listener(
+    { toolCallId: "tc-2", toolName: "bash", args: {} },
+    {
+      accept: () => { resolved = "accept"; },
+      reject: () => { resolved = "reject"; },
+    },
+  );
+  assert.equal(resolved, "accept");
+});
+
+test("approval/request: default mode calls _liveAcpClient.request and respects allow_once", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "default", timeoutMs: 1000, editTools: [] },
+    model: "default/m",
+  });
+  let requested = null;
+  rt._liveAcpClient = {
+    async request(method, params) {
+      requested = { method, params };
+      return { outcome: { outcome: "selected", optionId: "allow_once" } };
+    },
+  };
+  rt._activeSessionId = "sess-A";
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  let verdict = null;
+  await stored.listener(
+    { toolCallId: "tc-3", toolName: "Read", args: { path: "/x" }, reason: "Read file" },
+    {
+      accept: () => { verdict = "accept"; },
+      reject: (r) => { verdict = `reject:${r}`; },
+    },
+  );
+  assert.equal(verdict, "accept");
+  assert.equal(requested.method, "session/request_permission");
+  assert.equal(requested.params.toolCallId, "tc-3");
+  assert.equal(requested.params.title, "Read file");
+  assert.equal(requested.params.sessionId, "sess-A");
+});
+
+test("approval/request: reject_once → reject called with reason", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "default", timeoutMs: 1000, editTools: [] },
+    model: "default/m",
+  });
+  rt._liveAcpClient = {
+    async request() {
+      return { outcome: { outcome: "selected", optionId: "reject_once" } };
+    },
+  };
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  let verdict = null;
+  await stored.listener(
+    { toolCallId: "tc-4", toolName: "bash", args: {} },
+    {
+      accept: () => { verdict = "accept"; },
+      reject: (r) => { verdict = `reject:${r}`; },
+    },
+  );
+  assert.match(verdict, /^reject:/);
+  assert.match(verdict, /user:reject_once/);
+});
+
+test("approval/request: cache hit short-circuits and skips requester", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "default", timeoutMs: 1000, editTools: [] },
+    model: "default/m",
+  });
+  let requestCount = 0;
+  rt._liveAcpClient = {
+    async request() {
+      requestCount++;
+      return { outcome: { outcome: "selected", optionId: "allow_once" } };
+    },
+  };
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  const reply = { accept: () => {}, reject: () => {} };
+  await stored.listener({ toolCallId: "tc-5", toolName: "Read", args: { p: 1 } }, reply);
+  await stored.listener({ toolCallId: "tc-6", toolName: "Read", args: { p: 1 } }, reply);
+  assert.equal(requestCount, 1, "second call must hit cache");
+});
+
+test("approval/request: acceptEdits auto-allows Edit but asks bash", async () => {
+  const ctx = fakeCtx([]);
+  const rt = new LongRuntime();
+  await rt.init({
+    cordisCtx: ctx,
+    acpClient: fakeClient(),
+    permissionConfig: { mode: "acceptEdits", timeoutMs: 1000, editTools: ["Edit"] },
+    model: "default/m",
+  });
+  let requestCount = 0;
+  rt._liveAcpClient = {
+    async request() {
+      requestCount++;
+      return { outcome: { outcome: "selected", optionId: "allow_once" } };
+    },
+  };
+  const stored = rt._agentListeners.find((l) => l.event === "approval/request");
+  const replyEdit = { accept: () => {}, reject: () => {} };
+  const replyBash = { accept: () => {}, reject: () => {} };
+  await stored.listener({ toolCallId: "tc-edit", toolName: "Edit", args: {} }, replyEdit);
+  await stored.listener({ toolCallId: "tc-bash", toolName: "bash", args: {} }, replyBash);
+  assert.equal(requestCount, 1, "Edit auto-allows; only bash asks");
+});
+
+test("dispose: detaches all agent listeners + clears gate cache", async () => {
+  const ctx = fakeCtx([]);
+  const offed = [];
+  ctx.off = (event, listener) => offed.push({ event, listener });
+  const rt = new LongRuntime();
+  await rt.init({ cordisCtx: ctx, acpClient: fakeClient(), model: "default/m" });
+  // populate cache
+  await rt.gate.resolve({ toolName: "Read", args: { p: 1 } }, "x", null);
+  assert.equal(rt.gate.cacheSize, 0, "default mode returns 'ask' (not cached)");
+  // manually cache via bypass mode
+  rt.gate.mode = "bypassPermissions";
+  await rt.gate.resolve({ toolName: "Edit", args: { p: 1 } }, "y", null);
+  assert.ok(rt.gate.cacheSize > 0);
+
+  await rt.dispose();
+
+  assert.equal(rt._agentListeners.length, 0);
+  assert.equal(rt.gate, null);
+  // off() called for each registered listener
+  assert.ok(offed.length >= 2, `expected >=2 off() calls, got ${offed.length}`);
+  const offedEvents = offed.map((o) => o.event);
+  assert.ok(offedEvents.includes("agent/pre-step"));
+  assert.ok(offedEvents.includes("approval/request"));
+});
