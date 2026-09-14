@@ -36,6 +36,7 @@ import {
   updateSessionMeta,
 } from "./archive-store.mjs";
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
+import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -537,6 +538,46 @@ function runAcp() {
   return connection;
 }
 
+// ---- FEAT (P2.0): dual-runtime dispatch ----------------------------------
+// Resolves runtime.mode at startup. Long mode requires a dsh cordis ctx
+// accessible via globalThis.__DSH_CORDIS_CTX__ (set by the cordis plugin when
+// hosting in-process). The standalone binary never has this, so it falls back
+// to spawn mode. P1.0: long-mode init() throws a placeholder error so callers
+// see a clear "not yet implemented" message and the spawn fallback kicks in.
+//
+// All dispatch logs go to stderr — stdout is reserved for ACP JSON-RPC.
+async function runAcpDualMode() {
+  const mode = resolveRuntimeMode();
+  const permissionConfig = resolvePermissionConfig();
+  process.stderr.write(`[dsh-acp] runtime mode: ${mode} permission.mode=${permissionConfig.mode}\n`);
+
+  if (mode === "spawn") return runAcp();
+
+  // Long mode: requires cordis ctx injected by the cordis plugin.
+  const cordisCtx = globalThis.__DSH_CORDIS_CTX__;
+  if (!cordisCtx) {
+    process.stderr.write("[dsh-acp] long mode requested but no cordis ctx available; falling back to spawn\n");
+    return runAcp();
+  }
+
+  // Lazy import so standalone binary never pays the cost.
+  const { getLongRuntime } = await import("./lib/long-runtime.mjs");
+  const rt = getLongRuntime();
+  try {
+    await rt.init({ cordisCtx, acpClient: null, permissionConfig, cwd: process.cwd() });
+    // P1.0: init() throws a placeholder; if it somehow returns we have no
+    // prompt bridge yet, so fall back.
+    process.stderr.write("[dsh-acp] long mode init returned without error (unexpected in P1.0); falling back to spawn\n");
+    return runAcp();
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    process.stderr.write(`[dsh-acp] long mode init failed: ${msg}\n`);
+    const fallback = (process.env.DSH_ACP_SPAWN_FALLBACK ?? "true") !== "false";
+    if (!fallback) throw err;
+    return runAcp();
+  }
+}
+
 function nodeToWebWritable(nodeStream) {
   const { WritableStream } = globalThis;
   return new WritableStream({
@@ -571,6 +612,10 @@ if (process.argv[2] === "doctor") {
 } else if (process.argv[2] === "manage") {
   const { runManageCli } = await import("./session-manage.mjs");
   await runManageCli(process.argv.slice(3));
+} else {
+  // Default: dual-mode ACP server (spawn or long per env).
+  runAcpDualMode().catch((err) => {
+    console.error("[dsh-acp] fatal:", err && err.message ? err.message : err);
+    process.exit(1);
+  });
 }
-
-runAcp();

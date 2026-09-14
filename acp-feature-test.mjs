@@ -12,12 +12,29 @@
 //   6. a prompt round-trips through echo and archives a user/assistant turn
 //
 // Uses only the generic ctx.request(...) client API (no helper sugar).
+//
+// P2: --runtime {spawn|long} flag selects which runtime mode the adapter
+// uses. In a standalone-binary test (no cordis ctx), long mode will log
+// "long mode init failed" and fall back to spawn (P1.0 placeholder behavior).
 
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// CLI: --runtime spawn|long  (default: spawn, backward-compatible)
+function parseRuntimeFlag(argv) {
+  const idx = argv.indexOf("--runtime");
+  if (idx === -1) return "spawn";
+  const v = argv[idx + 1];
+  if (v !== "spawn" && v !== "long") {
+    console.error(`Unknown --runtime value: ${v}; expected spawn|long`);
+    process.exit(2);
+  }
+  return v;
+}
+const runtimeMode = parseRuntimeFlag(process.argv.slice(2));
 
 const workdir = mkdtempSync(join(tmpdir(), "dsh-acp-test-"));
 const storeDir = join(workdir, "store");
@@ -47,7 +64,19 @@ function nodeToWebReadable(s) {
 
 const child = spawn(process.execPath, [adapterBin], {
   cwd: process.cwd(),
-  env: { ...process.env, DSH_BIN: process.env.TEST_DSH_BIN || "echo", DSH_ACP_STORE_DIR: storeDir, DSH_HOME: dshHome, DSH_PROFILE: "headless", DSH_ACP_GC: "off" },
+  env: {
+    ...process.env,
+    DSH_BIN: process.env.TEST_DSH_BIN || "echo",
+    DSH_ACP_STORE_DIR: storeDir,
+    DSH_HOME: dshHome,
+    DSH_PROFILE: "headless",
+    DSH_ACP_GC: "off",
+    // P2: runtime-mode flag (resolved by dsh-acp.mjs's lib/runtime-switch).
+    DSH_ACP_RUNTIME_MODE: runtimeMode,
+    // P1.0: spawn fallback is on by default; long-mode init throws placeholder
+    // so the adapter falls back to spawn and the protocol-layer test still runs.
+    DSH_ACP_SPAWN_FALLBACK: "true",
+  },
   stdio: ["pipe", "pipe", "pipe"],
 });
 child.stderr.on("data", (d) => process.stderr.write("[adapter] " + d));
@@ -61,6 +90,7 @@ app.onNotification(methods.client.session.update, (ctx) => {
 });
 
 await app.connectWith(stream, async (ctx) => {
+  console.log(`== runtime mode requested: ${runtimeMode} (headless profile will force spawn when no cordis ctx) ==`);
   // 1. capability declaration
   const init = await ctx.request(methods.agent.initialize, { protocolVersion: 1, clientCapabilities: {} });
   const caps = init.agentCapabilities || {};

@@ -33,6 +33,7 @@
     "import-session.mjs",
     "session-manage.mjs",
     "archive-store.mjs",
+    "lib/",
     "web/",
     "cordis.patch.yml",
     "install.sh",
@@ -41,7 +42,11 @@
   ],
   "scripts": {
     "start": "node dsh-acp.mjs",
-    "test": "node acp-feature-test.mjs"
+    "test": "node acp-feature-test.mjs",
+    "test:unit": "node --test test/runtime-switch.test.mjs test/long-runtime.test.mjs",
+    "test:protocol": "node acp-feature-test.mjs",
+    "test:long": "node acp-feature-test.mjs --runtime long",
+    "test:all": "npm run test:unit && npm run test:protocol && npm run test:long"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
