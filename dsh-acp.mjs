@@ -258,8 +258,57 @@ function modelConfigOption(session) {
   };
 }
 
+/**
+ * Per-session temperature override. P2.5: surfaced as a configOption so
+ * Obsidian's settings panel can dial it without re-spawning dsh.
+ */
+function temperatureConfigOption(session) {
+  // Persist on the session record so it survives across turns.
+  const current = typeof session?.temperature === "number" ? session.temperature : 0.7;
+  return {
+    id: "temperature",
+    name: "Temperature",
+    description: "Sampling temperature (0 = deterministic, 2 = chaotic)",
+    category: "model",
+    type: "number",
+    currentValue: current,
+    min: 0,
+    max: 2,
+    // ACP configOption `step` is in 0.05 increments; clients may snap to
+    // a coarser grid. The bridge passes the value through verbatim to
+    // ctx.llm.stream().
+  };
+}
+
+/**
+ * Per-session reasoning-effort override. Maps to dsh's ReasoningEffortId.
+ * P2.5: surfaced as a configOption select.
+ */
+function reasoningEffortConfigOption(session) {
+  const valid = ["none", "low", "medium", "high"];
+  const current = valid.includes(session?.reasoningEffort) ? session.reasoningEffort : "medium";
+  return {
+    id: "reasoningEffort",
+    name: "Reasoning Effort",
+    description: "How much the model should 'think' before answering",
+    category: "model",
+    type: "select",
+    currentValue: current,
+    options: [
+      { value: "none", name: "None" },
+      { value: "low", name: "Low" },
+      { value: "medium", name: "Medium" },
+      { value: "high", name: "High" },
+    ],
+  };
+}
+
 function sessionConfigOptions(session) {
-  return [modelConfigOption(session)];
+  return [
+    modelConfigOption(session),
+    temperatureConfigOption(session),
+    reasoningEffortConfigOption(session),
+  ];
 }
 
 /** Merge disk-scanned archives with the durable index for session/list. */
@@ -410,15 +459,27 @@ function createAgent() {
     async closeSession() { return undefined; },
     async setSessionMode() { return undefined; },
     async setSessionConfigOption(params) {
-      // Per-session model override (FEAT). `params.configId === "model"`:
-      // persist the chosen model id onto the session record so prompt() can
-      // apply it. Returns the (possibly updated) configOptions list.
+      // Per-session config override (FEAT). Recognised configIds:
+      //   "model"           — switch the session's model
+      //   "temperature"     — P2.5: number 0..2
+      //   "reasoningEffort" — P2.5: "none" | "low" | "medium" | "high"
+      // Persist onto the session record so prompt() can apply it.
       const session = getSession(params.sessionId);
       if (!session) throw new RequestError(`session ${params.sessionId} not found`);
       if (params.configId === "model" && typeof params.value === "string") {
         const valid = availableModels().map((m) => m.id);
         if (valid.includes(params.value)) {
           updateSessionMeta(params.sessionId, { model: params.value });
+        }
+      } else if (params.configId === "temperature") {
+        const n = Number(params.value);
+        if (Number.isFinite(n) && n >= 0 && n <= 2) {
+          updateSessionMeta(params.sessionId, { temperature: n });
+        }
+      } else if (params.configId === "reasoningEffort") {
+        const valid = ["none", "low", "medium", "high"];
+        if (typeof params.value === "string" && valid.includes(params.value)) {
+          updateSessionMeta(params.sessionId, { reasoningEffort: params.value });
         }
       }
       return { configOptions: sessionConfigOptions(getSession(params.sessionId) ?? session) };
@@ -463,7 +524,11 @@ function createAgent() {
           const result = await rt.prompt({
             sessionId: params.sessionId,
             prompt: params.prompt,
-            sessionConfig: { model: session.model ?? undefined },
+            sessionConfig: {
+              model: session.model ?? undefined,
+              temperature: typeof session.temperature === "number" ? session.temperature : undefined,
+              reasoningEffort: session.reasoningEffort ?? undefined,
+            },
           });
           return {
             stopReason: result.stopReason,
