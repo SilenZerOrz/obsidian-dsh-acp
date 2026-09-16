@@ -37,6 +37,7 @@ import {
 } from "./archive-store.mjs";
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
+import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -136,10 +137,27 @@ if (logDir) {
 // process only. The temp patch file is written to the OS temp dir, used by
 // exactly one `dsh --profile headless` invocation, and removed afterwards — so
 // per-session model switching never mutates the user's shared profile settings.
+// FEAT (FE-1): the default provider used when a `provider/model` session value
+// is missing its provider part. Mirrors the headless profile's `agent-default-model`.
+const DEFAULT_PROVIDER = process.env.DSH_ACP_DEFAULT_PROVIDER || "jl-token";
+
+/**
+ * Split a `provider/model` combination (the flattened value we store on the
+ * session and expose in the dropdown) into its parts. A bare model id (legacy
+ * sessions) resolves to the default provider, matching how `agent-default-model`
+ * is patched for a provider-less override.
+ */
+function splitModel(combo) {
+  if (!combo || typeof combo !== "string") return { provider: DEFAULT_PROVIDER, model: undefined };
+  const idx = combo.indexOf("/");
+  if (idx === -1) return { provider: DEFAULT_PROVIDER, model: combo };
+  return { provider: combo.slice(0, idx), model: combo.slice(idx + 1) };
+}
+
 function modelPatchArgs(model, provider) {
   const dir = mkdtempSync(joinPath(tmpdir(), "dsh-acp-model-"));
   const file = joinPath(dir, "model.patch.yml");
-  const prov = provider || "jl-token";
+  const prov = provider || DEFAULT_PROVIDER;
   writeFileSync(file, [
     `- id: agent-default-model`,
     `  name: '@deepseek-ai/dsh-agent-default-model'`,
@@ -158,7 +176,11 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
     // leave to dsh), add a disposable patch overlay that pins agent-default-model.
     let patchInfo = null;
     if (modelOverride) {
-      patchInfo = modelPatchArgs(modelOverride);
+      // modelOverride carries a `provider/model` value (FE-1). Split so the
+      // disposable agent-default-model patch targets the right provider too,
+      // not just the model.
+      const { provider, model } = splitModel(modelOverride);
+      patchInfo = modelPatchArgs(model, provider);
       args.splice(args.length - 1, 0, "--patch", patchInfo.file);
     }
     const child = spawn(DSH_BIN, args, {
@@ -220,33 +242,65 @@ const DEFAULTS = {
   }),
 };
 
-// ---- FEAT: per-session model switching (ACP session config option) --------
-// Models offered to Obsidian's configOption dropdown. Defaults mirror the
-// headless profile's llm-pi-ai (jl-token) catalog; override via DSH_ACP_MODELS
-// as comma-separated "id(display)" pairs.
-const DEFAULT_MODELS = [
+// ---- FEAT: per-session provider + model switching (FE-1) -----------------
+// Models offered to Obsidian's configOption dropdown are enumerated from dsh's
+// configured providers (`~/.dsh/settings.yaml` → llm-pi-ai.providers), each as
+// a flattened "provider/model" value — still compatible with long-runtime's
+// `extractProvider`. When settings.yaml is missing / has no providers, fall
+// back to an env override (DSH_ACP_MODELS) then a small built-in default list.
+const FALLBACK_MODELS = [
   { id: process.env.DSH_ACP_DEFAULT_MODEL || "DeepSeek-V4-Flash" },
   { id: "Kimi-K2.6" },
   { id: "gemini-2.5-pro" },
   { id: "Qwen3.8" },
 ];
+function providerCatalogModels() {
+  return loadProviderCatalog().map((c) => ({
+    id: `${c.provider}/${c.model}`,
+    name: c.name,
+    provider: c.provider,
+    model: c.model,
+  }));
+}
 function availableModels() {
   const raw = process.env.DSH_ACP_MODELS;
   if (raw) {
+    // Explicit env override wins (back-compat): bare ids resolve to the default provider.
     return raw.split(",").map((s) => s.trim()).filter(Boolean).map((s) => {
       const m = s.match(/^([^(]+)(?:\((.+)\))?$/);
-      return { id: m[1].trim(), name: (m[2] ?? m[1]).trim() };
+      const id = m[1].trim();
+      return { id, name: (m[2] ?? id).trim(), provider: DEFAULT_PROVIDER, model: id };
     });
   }
-  return DEFAULT_MODELS.map((m) => ({ id: m.id, name: m.id }));
+  const catalog = providerCatalogModels();
+  if (catalog.length > 0) return catalog;
+  return FALLBACK_MODELS.map((m) => ({
+    id: m.id,
+    name: m.id,
+    provider: splitModel(m.id).provider,
+    model: splitModel(m.id).model,
+  }));
+}
+
+/**
+ * Resolve the dropdown's current flattened `provider/model` value, tolerating a
+ * legacy bare model id that predates FE-1. Falls back to the default provider's
+ * first model (matching `agent-default-model`) then the first entry overall.
+ */
+function pickCurrentModel(model, models) {
+  if (model) {
+    if (models.some((m) => m.id === model)) return model; // already `provider/model`
+    const bare = models.find((m) => m.model === model); // legacy bare id
+    if (bare) return bare.id;
+  }
+  const def = models.find((m) => m.provider === DEFAULT_PROVIDER) ?? models[0];
+  return def ? def.id : undefined;
 }
 
 /** Build the ACP `model` config option (select) for a session. */
 function modelConfigOption(session) {
   const models = availableModels();
-  const current = session?.model && models.some((m) => m.id === session.model)
-    ? session.model
-    : models[0]?.id;
+  const current = pickCurrentModel(session?.model, models);
   return {
     id: "model",
     name: "Model",
@@ -261,22 +315,43 @@ function modelConfigOption(session) {
 /**
  * Per-session temperature override. P2.5: surfaced as a configOption so
  * Obsidian's settings panel can dial it without re-spawning dsh.
+ *
+ * ACP's zSessionConfigOption only supports `select`/`boolean` — a `number`
+ * configOption crashes Obsidian's client renderer (it reads `.options.length`
+ * on every configOption, which is undefined for number form). So temperature
+ * is exposed as a DISCRETE select ladder; the persisted value stays a number
+ * (setSessionConfigOption does Number(value) before writing).
  */
+const TEMPERATURE_STEPS = [0, 0.25, 0.5, 0.7, 1, 1.25, 1.5, 2];
+
+/** Snap a temperature to the nearest ladder step (0.7 default). */
+function snapTemperature(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) value = 0.7;
+  let best = TEMPERATURE_STEPS[0];
+  let bestDiff = Infinity;
+  for (const s of TEMPERATURE_STEPS) {
+    const d = Math.abs(s - value);
+    if (d < bestDiff) {
+      bestDiff = d;
+      best = s;
+    }
+  }
+  return best;
+}
+
 function temperatureConfigOption(session) {
-  // Persist on the session record so it survives across turns.
-  const current = typeof session?.temperature === "number" ? session.temperature : 0.7;
+  const current = snapTemperature(session?.temperature);
   return {
     id: "temperature",
     name: "Temperature",
     description: "Sampling temperature (0 = deterministic, 2 = chaotic)",
     category: "model",
-    type: "number",
-    currentValue: current,
-    min: 0,
-    max: 2,
-    // ACP configOption `step` is in 0.05 increments; clients may snap to
-    // a coarser grid. The bridge passes the value through verbatim to
-    // ctx.llm.stream().
+    type: "select",
+    currentValue: String(current),
+    options: TEMPERATURE_STEPS.map((v) => ({
+      value: String(v),
+      name: v === 0.7 ? "0.7 (default)" : String(v),
+    })),
   };
 }
 

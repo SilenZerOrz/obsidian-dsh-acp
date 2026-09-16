@@ -62,6 +62,7 @@ import {
   discoverObsidianSessions,
   importObsidianSession,
   importObsidianSessionAsDsh,
+  markObsidianImported,
 } from "./obsidian-import.mjs";
 
 /** 读请求 body 的 JSON（空 body 按 {}；畸形 JSON 由路由 catch 兜底）。 */
@@ -96,6 +97,8 @@ function summarizeDshHeader(h) {
     updatedAt: typeof src.updatedAt === "number" ? src.updatedAt
       : (typeof src.updated === "number" ? src.updated : Date.now()),
     source: typeof src.source === "string" ? src.source : "",
+    // 透传会话总结概要（dsh 原生压缩/摘要若提供，则直接用于前端「会话」列表展示）
+    ...(typeof src.summary === "string" && src.summary ? { summary: src.summary } : {}),
     // 透传任意额外字段（model / agentPreset / 等）便于面板展示
     ...(src.model ? { model: src.model } : {}),
     ...(src.agentPreset ? { agentPreset: src.agentPreset } : {}),
@@ -104,6 +107,47 @@ function summarizeDshHeader(h) {
     ...(typeof h?.eventCount === "number" ? { eventCount: h.eventCount } : {}),
     ...(typeof h?.sizeBytes === "number" ? { sizeBytes: h.sizeBytes } : {}),
   };
+}
+
+/** 读 dsh 原生会话的「对话轮数 + 概要」，用于「会话」合并列表展示（有则显、无则占位）。
+ *  轮数 = 事件中 turn/start 数量；概要 = header.summary（压缩摘要）或首条 user 消息前 40 字。
+ *  读取失败返回空字段，不阻塞列表。 */
+async function summarizeDshSessionDetail(sp, sessionId) {
+  const detail = { turns: 0, summary: "", title: "" };
+  try {
+    if (typeof sp.open !== "function") return detail;
+    const handle = await sp.open(sessionId, "read");
+    try {
+      const r = await handle.read(0);
+      const events = (r && Array.isArray(r.events)) ? r.events : [];
+      // 标题：sp.list() 的 header 没有 title 字段（header schema 仅含
+      // version/id/createdAt/cwd/parentSession/isSeeded/origin/delegationDepth/agentPreset），
+      // 标题通过 session/title 事件折叠得到。dsh 自身的 left sidebar 走
+      // sessionProjectionCache.cachedSnapshot(含 values.title)；我们的 /dsh-list 是直接
+      // 落盘快照，没拿投影——所以手工 fold 一份，从尾部向前取最后一个 session/title。
+      let lastTitleEvent = null;
+      for (const e of events) {
+        if (!e || typeof e !== "object") continue;
+        if (e.type === "turn/start") detail.turns++;
+        if (!detail.summary && e.type === "user/message") {
+          const c = e.data && Array.isArray(e.data.content) ? e.data.content : [];
+          detail.summary = c
+            .map((b) => (b && b.text) || "").join(" ").replace(/\s+/g, " ").trim().slice(0, 40);
+        }
+        if (e.type === "session/title" && e.data && typeof e.data.title === "string") {
+          lastTitleEvent = e; // 不立即覆盖：保留最后一个（findLast 等价）
+        }
+      }
+      if (lastTitleEvent) detail.title = lastTitleEvent.data.title;
+      const hdr = handle.header || {};
+      if (!detail.summary && typeof hdr.summary === "string" && hdr.summary) {
+        detail.summary = hdr.summary.slice(0, 80);
+      }
+    } finally {
+      if (typeof handle?.close === "function") await handle.close();
+    }
+  } catch { /* 读取失败：保留空字段 */ }
+  return detail;
 }
 
 /** 注册 P1b 面板路由到 dsh webServer。ctx 是 apply 的外层 ctx（handler 闭包用它访问
@@ -218,9 +262,23 @@ export function registerSessionPanelRoutes(ctx, ws) {
           return;
         }
         const headers = await sp.list();
-        const sessions = (Array.isArray(headers) ? headers : [])
-          .map(summarizeDshHeader)
-          .filter(Boolean);
+        const sessions = [];
+        for (const h of (Array.isArray(headers) ? headers : [])) {
+          const rec = summarizeDshHeader(h);
+          if (!rec) continue;
+          // 补对话轮数 + 概要 + 标题（供「会话」合并列表展示；读取失败保留已有字段）。
+          // 标题回填：仅当 header.title 为空时才用事件 fold 出来的标题，避免覆盖 dsh 原生
+          // 已写入 header 的标题（极少数路径会写）。
+          try {
+            const detail = await summarizeDshSessionDetail(sp, rec.sessionId);
+            if (detail && typeof detail.turns === "number") rec.turns = detail.turns;
+            if (detail && detail.summary && !rec.summary) rec.summary = detail.summary;
+            if (detail && typeof detail.title === "string" && detail.title && !rec.title) {
+              rec.title = detail.title;
+            }
+          } catch { /* 忽略 */ }
+          sessions.push(rec);
+        }
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, sessions }));
       } catch (err) {
@@ -313,6 +371,8 @@ export function registerSessionPanelRoutes(ctx, ws) {
           return;
         }
         const r = await importObsidianSessionAsDsh(ctx, p);
+        // 成功写入 dsh 原生后标记该 Obsidian 会话已导入（修复「导入后仍显示未导入 / 按钮无反应」）
+        markObsidianImported(p, r.sessionId);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, ...r }));
       } catch (err) {
