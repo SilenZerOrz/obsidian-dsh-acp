@@ -355,7 +355,7 @@ test("extractPromptText: object with content array", () => {
 
 // --- buildStreamOptions ---------------------------------------------------
 
-test("buildStreamOptions: extracts provider from 'provider/model' id", () => {
+test("buildStreamOptions: splits provider from a flattened 'provider/model' id", () => {
   const opts = buildStreamOptions({
     promptText: "hi",
     sessionConfig: { model: "anthropic/claude-3" },
@@ -364,13 +364,14 @@ test("buildStreamOptions: extracts provider from 'provider/model' id", () => {
     cwd: "/tmp",
   });
   assert.equal(opts.provider, "anthropic");
-  assert.equal(opts.model, "anthropic/claude-3");
+  // GenerateOptions.model must be the BARE model id — provider is a separate field.
+  assert.equal(opts.model, "claude-3");
   assert.equal(opts.messages.length, 1);
   assert.equal(opts.messages[0].role, "user");
   assert.equal(opts.messages[0].content, "hi");
 });
 
-test("buildStreamOptions: defaults provider to 'default' for bare model id", () => {
+test("buildStreamOptions: defaults provider to 'default' and keeps bare model id", () => {
   const opts = buildStreamOptions({
     promptText: "hi",
     sessionConfig: { model: "DeepSeek-V4-Flash" },
@@ -379,6 +380,7 @@ test("buildStreamOptions: defaults provider to 'default' for bare model id", () 
     cwd: "/tmp",
   });
   assert.equal(opts.provider, "default");
+  assert.equal(opts.model, "DeepSeek-V4-Flash");
 });
 
 test("buildStreamOptions: falls back to defaultModel when sessionConfig omits model", () => {
@@ -389,7 +391,8 @@ test("buildStreamOptions: falls back to defaultModel when sessionConfig omits mo
     history: [],
     cwd: "/tmp",
   });
-  assert.equal(opts.model, "default/fb");
+  assert.equal(opts.provider, "default");
+  assert.equal(opts.model, "fb");
 });
 
 test("buildStreamOptions: throws when no model is resolvable", () => {

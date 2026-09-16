@@ -13,14 +13,48 @@
 // vault 目录来源（优先级）：env DSH_ACP_OBSIDIAN_DIRS（分号分隔）> 内置探测
 // ~/Documents/Obsidian Vault 与 ~/文档/zyqWiki 及 $HOME 下 name 含 "Obsidian"/"Vault"/"zyq"
 // 的目录（避免硬编码用户路径）。可覆盖防止探到无关目录。
-import { readdirSync, readFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { normalizeExternalSession, importExternalSessionFile } from "../import-session.mjs";
-import { allSessions, updateSessionMeta } from "../archive-store.mjs";
+import { allSessions, updateSessionMeta, dshHome } from "../archive-store.mjs";
 
 const OBSIDIAN_SUBDIR = ".obsidian/plugins/agent-client/sessions";
+
+// ─── 已导入 Obsidian 会话的轻量索引 ────────────────────────────────
+// 新导入路径 importObsidianSessionAsDsh 写入 dsh 原生存储（agents.create / sp.create），
+// 并不落 ~/.dsh-acp store——因此 discoverObsidianSessions 不能只靠 allSessions()（旧
+// store）判定「已导入」，否则导入成功后 imported 仍为 false（按钮无反应）。
+// 这里维护一个独立 JSON 索引 { [obsidianPath]: { sessionId, at } }，导入成功后写入，
+// discover 时合并判定，修复「导入后仍显示未导入」。
+const obsidianImportedIndexPath = () => join(dshHome(), "obsidian-imported.json");
+
+/** 记录一次已成功写入 dsh 原生存储的 Obsidian 导入（幂等，失败静默不影响导入）。 */
+export function markObsidianImported(path, sessionId) {
+  try {
+    const file = obsidianImportedIndexPath();
+    let idx = {};
+    try { idx = JSON.parse(readFileSync(file, "utf8") || "{}"); } catch { idx = {}; }
+    if (!idx || typeof idx !== "object") idx = {};
+    idx[path] = { sessionId: sessionId ?? "", at: Date.now() };
+    writeFileSync(file, JSON.stringify(idx, null, 2));
+  } catch { /* 索引写入失败不阻塞导入主流程 */ }
+}
+
+/** 已导入的 Obsidian 会话 path 集合（合并旧 store meta + 新索引）。 */
+function alreadyImportedObsidianPaths() {
+  const imported = new Set();
+  for (const s of allSessions()) {
+    if (typeof s.obsidianSessionId === "string") imported.add(s.obsidianSessionId);
+    if (typeof s.obsidianFile === "string") imported.add(s.obsidianFile);
+  }
+  try {
+    const idx = JSON.parse(readFileSync(obsidianImportedIndexPath(), "utf8") || "{}");
+    if (idx && typeof idx === "object") for (const p of Object.keys(idx)) imported.add(p);
+  } catch { /* 索引不可读：仅用旧 store 判定 */ }
+  return imported;
+}
 
 // DSH 会话事件版本号。
 // 0.1.5 起 session 格式升到 V3（SESSION_FORMAT_VERSION = 3）；0.1.2 时代为 0。
@@ -70,12 +104,8 @@ export function discoverObsidianSessions() {
     ? configuredVaults().map((d) => ({ base: d, sp: join(d, OBSIDIAN_SUBDIR) }))
     : detectVaults().map((base) => ({ base, sp: join(base, OBSIDIAN_SUBDIR) }));
 
-  // 已导入的 Obsidian sessionId 集合（幂等去重依据）。
-  const imported = new Set();
-  for (const s of allSessions()) {
-    if (typeof s.obsidianSessionId === "string") imported.add(s.obsidianSessionId);
-    if (typeof s.obsidianFile === "string") imported.add(s.obsidianFile);
-  }
+  // 已导入的 Obsidian sessionId/路径集合（幂等去重依据）：旧 ~/.dsh-acp meta + 新索引。
+  const imported = alreadyImportedObsidianPaths();
 
   const out = [];
   for (const { base, sp } of dirs) {
@@ -94,6 +124,10 @@ export function discoverObsidianSessions() {
           title: (data && data.title) || pickObsidianTitle(data, sid),
           savedAt: data?.savedAt ?? "",
           messages: Array.isArray(data?.messages) ? data.messages.length : 0,
+          // 对话轮数 = user 提问次数（供「会话」合并列表展示）
+          userTurns: Array.isArray(data?.messages)
+            ? data.messages.filter((m) => m && m.role === "user").length
+            : 0,
           vault: base,
           imported: imported.has(sid) || imported.has(p),
         });
@@ -192,12 +226,28 @@ export function synthesizeDshEvents({ sessionId, title, turns, createdAt, provid
       source: { kind: "user" },
     }, true);
     if (t.response != null) {
+      // 0.1.5 要求 assistant/message 携带 **compact timed stream**（数组）—
+      // session-stats / session-projection 在 fold 时调用 dsh-llm 的
+      // assistantStreamFirstTokenTime(stream) → runFirstTokenTime(record) →
+      // firstRunMemberTime(run) 读 run.texts.length（或 run.args for tool-call）。
+      //
+      // 若 stream 里 record 是 chat content blocks（{type:"text", text:"..."}），
+      // record.type 既不是 "chunk" 也不是 "text-chunks"/"reasoning-chunks"/
+      // "tool-call-chunks" → 直接走 runFirstTokenTime → record.texts 是 undefined
+      // → "Cannot read properties of undefined (reading 'length')"。
+      //
+      // 正确 compact format（参考 dsh-llm/lib/index.js:1210-1240）：每条 record
+      // 是 { type:"chunk", time, chunk:{type:"text-delta", index, text} }
+      // 或     { type:"text-chunks", time0, dt, index, texts:["..."] }。
+      // 这里用 chunk record 最简单，每 turn 一条。
       push("assistant/message", {
         turn: turnIdx,
         step: 1,
-        // 0.1.5 要求 assistant/message 携带 settlement stream（数组）；缺则 agents.create 拒绝
-        // （"invalid settlement fields"）。stream 是 assistant 的流式内容块。
-        stream: [{ type: "text", text: t.response }],
+        stream: [{
+          type: "chunk",
+          time: baseTime,
+          chunk: { type: "text-delta", index: 0, text: t.response },
+        }],
         message: {
           id: `import:obsidian:${sessionId}:a${turnIdx}`,
           role: "assistant",
@@ -251,6 +301,8 @@ async function createDshSession(ctx, meta, events) {
   const errors = [];
 
   if (agents && typeof agents.create === "function") {
+    let _agentOptions;
+    let _presetId;
     try {
       const ap = ctx.get?.("agentPresets");
       let presetId;
@@ -261,6 +313,8 @@ async function createDshSession(ctx, meta, events) {
         } catch { /* 无默认 preset：继续，工具仍可 mount */ }
       }
       const agentOptions = await resolveAgentOptions(ctx);
+      _agentOptions = agentOptions;
+      _presetId = presetId;
       await agents.create({
         sessionId: meta.id,
         meta: { ...meta, ...(presetId ? { agentPreset: presetId } : {}) },
@@ -275,8 +329,22 @@ async function createDshSession(ctx, meta, events) {
       });
       return { via: "agents.create", presetId: presetId ?? null };
     } catch (err) {
-      errors.push(`agents.create: ${String((err && err.message) || err)}`);
-      // 临时诊断：打印 agents.create 具体失败 + 前 6 个事件类型/seq，定位 0.1.5 拒绝点
+      // 临时诊断：把 agents.create 失败原因 + stack + seed 序列 + args 写到 log，
+      // 下次重启 dsh web 后导入新 session 时观察，确定 0.1.5 的拒绝点。
+      const msg = String((err && err.message) || err);
+      const stack = String((err && err.stack) || "").split("\n").slice(0, 8).join("\n");
+      console.warn("[dsh-acp] agents.create failed (will fallback to sp.create):", msg);
+      console.warn("[dsh-acp] agents.create stack (first 8 frames):\n" + stack);
+      console.warn("[dsh-acp] seed events (first 6 types/seqs):",
+        events.slice(0, 6).map((e) => `${e.seq}:${e.type}`).join(", "));
+      console.warn("[dsh-acp] meta keys:", Object.keys(meta || {}).join(","));
+      console.warn("[dsh-acp] meta cwd:", String(meta?.cwd));
+      console.warn("[dsh-acp] meta id:", String(meta?.id));
+      console.warn("[dsh-acp] meta title:", String(meta?.title));
+      console.warn("[dsh-acp] meta agentPreset:", String(meta?.agentPreset));
+      console.warn("[dsh-acp] agentOptions (captured in try):", JSON.stringify(_agentOptions || {}));
+      console.warn("[dsh-acp] presetId (captured in try):", String(_presetId));
+      errors.push(`agents.create: ${msg}`);
     }
   }
 
@@ -363,17 +431,29 @@ async function attachToWorkspace(ctx, meta, sourcePath) {
   return false;
 }
 
-/** 预热投影缓存：让侧边栏无需打开会话即可显示标题/模型等元数据。失败仅记录。 */
+/** 预热投影缓存：让侧边栏无需打开会话即可显示标题/模型等元数据。
+ * 0.1.5 sessionProjectionCache.coldSnapshot 的签名在不同版本间不稳定：
+ *   - 早期：coldSnapshot(sessionId)
+ *   - 中期：coldSnapshot(sessionId, offset) — offset 必填非负整数
+ *   - 较新：coldSnapshot(sessionId, offset, options) — options.at 可能被读取
+ * 这里依次尝试 3 种签名，任意一个成功即返回 true；全失败静默返回 false
+ *（不污染 log；projection 不预热只影响侧栏首屏显示，不影响主界面加载会话）。
+ */
 async function warmProjection(ctx, sessionId) {
   const cache = ctx.get?.("sessionProjectionCache");
   if (!cache || typeof cache.coldSnapshot !== "function") return false;
-  try {
-    await cache.coldSnapshot(sessionId);
-    return true;
-  } catch (err) {
-    console.warn("[dsh-acp] projection warm-up failed: " + String((err && err.message) || err));
-    return false;
+  const attempts = [
+    [sessionId, 0],
+    [sessionId, 0, {}],
+    [sessionId, { offset: 0 }],
+  ];
+  for (const args of attempts) {
+    try {
+      await cache.coldSnapshot(...args);
+      return true;
+    } catch { /* 试下一个签名 */ }
   }
+  return false;
 }
 
 /**

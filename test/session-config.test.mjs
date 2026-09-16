@@ -78,6 +78,24 @@ test("buildStreamOptions: omits reasoningEffort when not set", () => {
 
 const VALID_TEMPERATURE_RANGE = [0, 2];
 const VALID_REASONING_EFFORTS = ["none", "low", "medium", "high"];
+// Mirrors TEMPERATURE_STEPS in dsh-acp.mjs. Temperature is surfaced as a
+// discrete select ladder (ACP's zSessionConfigOption has no `number` form),
+// with the persisted value snapped to the nearest step.
+const TEMPERATURE_STEPS = [0, 0.25, 0.5, 0.7, 1, 1.25, 1.5, 2];
+
+function snapTemperature(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) value = 0.7;
+  let best = TEMPERATURE_STEPS[0];
+  let bestDiff = Infinity;
+  for (const s of TEMPERATURE_STEPS) {
+    const d = Math.abs(s - value);
+    if (d < bestDiff) {
+      bestDiff = d;
+      best = s;
+    }
+  }
+  return best;
+}
 
 function validateTemperature(value) {
   const n = Number(value);
@@ -141,15 +159,18 @@ test("reasoningEffort: rejects unknown values", () => {
 // dsh-acp.mjs. Kept here as pure helpers so the shape contract is testable.
 
 function temperatureOptionShape(current) {
+  const safe = snapTemperature(current);
   return {
     id: "temperature",
     name: "Temperature",
     description: "Sampling temperature (0 = deterministic, 2 = chaotic)",
     category: "model",
-    type: "number",
-    currentValue: typeof current === "number" ? current : 0.7,
-    min: 0,
-    max: 2,
+    type: "select",
+    currentValue: String(safe),
+    options: TEMPERATURE_STEPS.map((v) => ({
+      value: String(v),
+      name: v === 0.7 ? "0.7 (default)" : String(v),
+    })),
   };
 }
 
@@ -167,21 +188,31 @@ function reasoningEffortOptionShape(current) {
   };
 }
 
-test("temperature option: shape is correct when current is a number", () => {
-  const opt = temperatureOptionShape(0.3);
-  assert.equal(opt.type, "number");
-  assert.equal(opt.currentValue, 0.3);
-  assert.equal(opt.min, 0);
-  assert.equal(opt.max, 2);
+test("temperature option: is a select with the temperature ladder", () => {
+  const opt = temperatureOptionShape(0.5);
+  assert.equal(opt.type, "select");
+  assert.equal(opt.currentValue, "0.5");
   assert.equal(opt.id, "temperature");
   assert.equal(opt.category, "model");
+  assert.deepEqual(
+    opt.options.map((o) => o.value),
+    ["0", "0.25", "0.5", "0.7", "1", "1.25", "1.5", "2"],
+  );
+  // 0.7 is marked as the default in its display name.
+  const def = opt.options.find((o) => o.value === "0.7");
+  assert.equal(def.name, "0.7 (default)");
+});
+
+test("temperature option: snaps arbitrary numeric current to the nearest step", () => {
+  assert.equal(temperatureOptionShape(0.3).currentValue, "0.25"); // 0.3 → 0.25
+  assert.equal(temperatureOptionShape(1.8).currentValue, "2"); // 1.8 → 2
+  assert.equal(temperatureOptionShape(1).currentValue, "1"); // exact step kept
 });
 
 test("temperature option: defaults to 0.7 when current is not a number", () => {
-  const opt = temperatureOptionShape(undefined);
-  assert.equal(opt.currentValue, 0.7);
-  const opt2 = temperatureOptionShape(null);
-  assert.equal(opt2.currentValue, 0.7);
+  assert.equal(temperatureOptionShape(undefined).currentValue, "0.7");
+  assert.equal(temperatureOptionShape(null).currentValue, "0.7");
+  assert.equal(temperatureOptionShape("hot").currentValue, "0.7");
 });
 
 test("reasoningEffort option: shape exposes all 4 values", () => {
