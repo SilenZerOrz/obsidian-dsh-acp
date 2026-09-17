@@ -230,11 +230,12 @@ export const Config = z.object({
 	profile: z.string().default("headless"),
 	env: z.dict(z.any()).default({}),
 	// P1b 面板：是否向 dsh web 注册 /api-session/* 路由。
-	// v0.2.1 起 **默认关闭**（npm 发布版不展示 dsh web UI 面板；前端 client.js 不在
-	// files 列表）。后端路由文件（web/session-panel.mjs 等）保留，仍可通过
-	// `dsh.client.web` 显式传入 `enableWebPanel: true` 启用（仅作开发/测试用，
-	// 不会进入 npm 包的 UI 表面）。headless / CI 无 webServer 时默认行为不变。
-	enableWebPanel: z.boolean().default(false),
+	// v0.2.3 起 **默认开启**（恢复 npm 发布版含 dsh web UI 面板：lib/client.js + 后端
+	// 路由 /api-session/*）。v0.2.1 曾拆分隐藏 UI 表面（后端保留），仅作测试版分支；
+	// v0.2.3 整合 #28 归档删除 + #30 subTab 合并 + #22 FE-1 模型供应商切换——UI 必含。
+	// 仍可通过 `enableWebPanel: false` 显式关闭。headless / CI 无 webServer 时默认
+	// 行为不变（ctx.inject 回调不触发，路由不挂）。
+	enableWebPanel: z.boolean().default(true),
 	// P2 long-runtime config. NOTE: schemastery 用 `z.const(value)` 表达字面量
 	// （没有 z.enum / z.literal），`z.union([z.const(...), ...])` 表达枚举。
 	// 错误用例会抛 "z.enum is not a function" / "z.literal is not a function"。

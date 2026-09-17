@@ -24,6 +24,9 @@
 //                                   -> { ok:true, text, sessionId, format }
 //   POST /api-session/archive         body:{sessionId, archived:boolean}
 //                                   -> { ok:true, session }
+//   POST /api-session/delete          body:{sessionId, mode:'trash'|'restore'|'permDel'}
+//                                   -> { ok:true, session } | { ok:true, deleted:true, sessionId }
+//                                      仅 dsh-acp 私有归档范围；trash/restore 无损，permDel 真删
 //   POST /api-session/move            body:{sessionId, cwd}
 //                                   -> { ok:true, session }
 //
@@ -56,8 +59,10 @@ import {
   listManagedSessions,
   exportSession,
   archiveSession,
+  trashSession,
   manageMoveSession,
 } from "../session-manage.mjs";
+import { deleteSession } from "../archive-store.mjs";
 import {
   discoverObsidianSessions,
   importObsidianSession,
@@ -162,7 +167,7 @@ export function registerSessionPanelRoutes(ctx, ws) {
     handler: async (req, res) => {
       try {
         const body = await readBody(req);
-        const filter = ["active", "archived", "all"].includes(body.filter) ? body.filter : "active";
+        const filter = ["active", "archived", "trashed", "all"].includes(body.filter) ? body.filter : "active";
         const cwd = typeof body.cwd === "string" && body.cwd ? body.cwd : undefined;
         const sessions = listManagedSessions(filter, cwd);
         res.writeHead(200, { "content-type": "application/json" });
@@ -212,6 +217,41 @@ export function registerSessionPanelRoutes(ctx, ws) {
           return;
         }
         const session = archiveSession(sessionId, body.archived);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, session }));
+      } catch (err) {
+        sendError(res, 500, (err && err.message) || err);
+      }
+    },
+  });
+
+  // 软删/恢复/永久删除（trashed:true=进回收站，false=从回收站恢复；mode=permDel 真删不可逆）
+  // 范围：仅 dsh-acp 私有归档（~/.dsh-acp/sessions/<cwd>/<archive>/）。dsh native session
+  // 删除走 ctx.sessionPersistence，步骤 5 评估 native API 后再扩展。
+  // body:{ sessionId, mode:'trash'|'restore'|'permDel' }
+  // 返回：{ ok:true, session }（trash/restore）/ { ok:true, deleted:true }（permDel）
+  ws.register({
+    kind: "exact",
+    path: "/api-session/delete",
+    handler: async (req, res) => {
+      try {
+        const body = await readBody(req);
+        const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+        if (!sessionId) { sendError(res, 400, "sessionId 必填"); return; }
+        const mode = body.mode;
+        if (mode !== "trash" && mode !== "restore" && mode !== "permDel") {
+          sendError(res, 400, "mode 必填，且必须是 trash | restore | permDel 之一");
+          return;
+        }
+        if (mode === "permDel") {
+          // 真删：archive-store.deleteSession 已清理 dsh-acp-archives + sessions 两 root
+          deleteSession(sessionId);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ ok: true, deleted: true, sessionId }));
+          return;
+        }
+        // trash / restore → 软删旗标切换（无损）
+        const session = trashSession(sessionId, mode === "trash");
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ ok: true, session }));
       } catch (err) {
