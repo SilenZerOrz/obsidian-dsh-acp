@@ -9,6 +9,7 @@ import {
   resolveRuntimeConfig,
   resolvePermissionConfig,
   tryLongFallbackSpawn,
+  _resetP2CacheForTesting,
   PERMISSION_DEFAULTS,
   RUNTIME_DEFAULTS,
 } from "../lib/runtime-switch.mjs";
@@ -22,13 +23,34 @@ test("resolveRuntimeMode: headless profile forces spawn", () => {
 });
 
 test("resolveRuntimeMode: explicit env wins over defaults", () => {
-  assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "long" }), "long");
-  assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "spawn" }), "spawn");
-  assert.equal(resolveRuntimeMode({ DSH_PROFILE: "web", DSH_ACP_RUNTIME_MODE: "long" }), "long");
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "long" }), "long");
+    assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "spawn" }), "spawn");
+    assert.equal(resolveRuntimeMode({ DSH_PROFILE: "web", DSH_ACP_RUNTIME_MODE: "long" }), "long");
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
 });
 
 test("resolveRuntimeMode: DSH_IN_CORDIS=1 implies long (when no override)", () => {
-  assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "1" }), "long");
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "1" }), "long");
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
+test("resolveRuntimeMode: P2 unavailable downgrades explicit long to spawn", () => {
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+  _resetP2CacheForTesting();
+  assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "long" }), "spawn");
+  assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "1" }), "spawn");
 });
 
 test("resolveRuntimeMode: standalone binary default is spawn", () => {
