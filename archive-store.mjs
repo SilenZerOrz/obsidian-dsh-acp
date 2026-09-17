@@ -248,6 +248,10 @@ export function updateSessionMeta(sessionId, patch = {}) {
   if (typeof patch.summaryAt === "number") rec.summaryAt = patch.summaryAt;
   if (typeof patch.model === "string") rec.model = patch.model;
   if (typeof patch.archived === "boolean") rec.archived = patch.archived;
+  // 软删除旗标（回收站机制）：trashed=true 不删磁盘文件，仅从 active 列表隐藏；
+  // 恢复时 trashed=false 即可，archive dir 完整保留 → 无损还原。
+  // 与 archived（用户级归档）独立：archived 会话不再需要操作；trashed 会话待清空/恢复。
+  if (typeof patch.trashed === "boolean") rec.trashed = patch.trashed;
   if (typeof patch.category === "string") rec.category = patch.category;
   if (typeof patch.obsidianSessionId === "string") rec.obsidianSessionId = patch.obsidianSessionId;
   if (typeof patch.obsidianFile === "string") rec.obsidianFile = patch.obsidianFile;
