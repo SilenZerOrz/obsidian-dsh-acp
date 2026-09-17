@@ -38,6 +38,12 @@ import {
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
+import {
+  probeDshWebGateway,
+  forwardPromptViaHttp,
+  shouldAttemptProxy,
+  getProxyBaseUrl as _getProxyBaseUrl,
+} from "./lib/proxy-mode.mjs";
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -567,6 +573,39 @@ function createAgent() {
       const cwd = session.cwd ?? process.cwd();
       const promptText = extractPromptText(params.prompt);
 
+      // P3.0 commit 3: dsh web HTTP/SSE proxy mode. Probe in runAcp() set
+      // globalThis.__DSH_ACP_PROXY_BASE_URL__ when dsh web gateway is alive;
+      // here we forward via fetch SSE and translate sessionUpdate events to
+      // ctx.client.notify. Fallback path (proxy fail) throws and the caller
+      // gets an end_turn error — long-runtime mode could retry via spawn.
+      if (globalThis.__DSH_ACP_PROXY_BASE_URL__) {
+        const baseUrl = globalThis.__DSH_ACP_PROXY_BASE_URL__;
+        process.stderr.write(`[dsh-acp] proxy forward session=${params.sessionId}\n`);
+        try { recordMessage(session.id, "user", promptText); } catch {}
+        try {
+          return await forwardPromptViaHttp({
+            baseUrl,
+            sessionId: params.sessionId,
+            prompt: params.prompt,
+            model: session.model ?? undefined,
+            temperature: typeof session.temperature === "number" ? session.temperature : undefined,
+            reasoningEffort: session.reasoningEffort ?? undefined,
+            signal: ctx.signal,
+            onUpdate: async (method, p) => {
+              if (!ctx?.client) return;
+              try {
+                await ctx.client.notify(method, p);
+              } catch (e) {
+                process.stderr.write(`[dsh-acp] proxy→ctx notify failed: ${e?.message ?? e}\n`);
+              }
+            },
+          });
+        } catch (e) {
+          process.stderr.write(`[dsh-acp] proxy forward failed: ${e?.message ?? e}; client will see end_turn\n`);
+          throw e;
+        }
+      }
+
       // P1.5 step 4: long-mode + mock-llm protocol test path. If long-runtime
       // is initialized (init() succeeded) AND mock-llm env is set, route the
       // turn through rt.prompt() with an acpClient wrapper that bridges
@@ -807,7 +846,29 @@ async function runAcpDualMode() {
 
 // ---- Wiring --------------------------------------------------------------
 function runAcp() {
-  const input = nodeToWebWritable(process.stdout);
+	// P3.0 commit 3: 探测 dsh web HTTP gateway (lib/http-gateway.mjs 在 webServer
+	// 上挂的 /acp/proxy/{probe,session/prompt})。若 ok,设 globalThis 标记,
+	// prompt() 入口见标记即转发到 HTTP/SSE,长流程在 dsh web 内 long-runtime
+	// 真实跑(思考/工具/审批可见),dsh-acp.mjs 仅 thin proxy。
+	// probe 是 async,不阻塞 JSON-RPC 输入。initialize 几乎瞬间完成,首个 prompt
+	// 触发时 probe 通常已完成,后续 turn 一定走 proxy。
+	// 失败/超时/未启用:stderr 一行 hint,继续 spawn(向后兼容)。
+	if (shouldAttemptProxy()) {
+		probeDshWebGateway().then((probe) => {
+			if (probe.ok) {
+				globalThis.__DSH_ACP_PROXY_BASE_URL__ = probe._baseUrl;
+				process.stderr.write(
+					`[dsh-acp] proxy mode: ${probe._baseUrl} (gateway v${probe.version ?? "?"}, mode=${probe.mode ?? "?"}, longReady=${probe.longReady === true})\n`,
+				);
+			} else if (probe.reason) {
+				process.stderr.write(`[dsh-acp] probe failed (${probe.reason}); spawn mode\n`);
+			}
+		}).catch((e) => {
+			process.stderr.write(`[dsh-acp] probe exception: ${e?.message ?? e}; spawn mode\n`);
+		});
+	}
+
+	const input = nodeToWebWritable(process.stdout);
   const output = nodeToWebReadable(process.stdin);
   const stream = ndJsonStream(input, output);
   const h = createAgent();
