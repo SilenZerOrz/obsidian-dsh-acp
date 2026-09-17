@@ -27,11 +27,39 @@
 // manage CLI。注册入口把 ctx 一并传给 registerSessionPanelRoutes（handler 需访问 host
 // 服务），与 dsh-chat-import 同样的晚挂载策略。
 
+// 2026-09-17 S6 fix：cordis logger 在某些 profile 不接 stdout（只有内部 buffer），
+// 实测 dsh-cost-meter 用 console.log 才能看见 [dsh-cost-meter] 已加载。
+// 给 dsh-acp 加 console.log 双写兜底，避免排查时以为 plugin 没加载 / runtime 没生效。
+import { appendFileSync } from "node:fs";
+const _acpLog = (level, msg) => {
+	const line = `[dsh-acp] ${msg}`;
+	// eslint-disable-next-line no-console
+	if (level === "error") console.error(line);
+	else if (level === "warn") console.warn(line);
+	else console.log(line);
+	// S6 debug：写到独立文件，绕过任何 stdout 屏蔽问题
+	try {
+		appendFileSync("/tmp/dsh-acp-debug.log", `${new Date().toISOString()} [${level}] ${line}\n`);
+	} catch {}
+};
+// 模块顶层自检：apply() 都不跑，至少知道 module 被 require 了
+_acpLog("info", "module TOP-LEVEL loaded (file=index.mjs pid=" + process.pid + " ppid=" + process.ppid + ")");
+
+// 2026-09-17 S6 回滚：删 EMERGENCY-1/2/3 sync spawn 块（48-103 行）。
+// 选项 D 已确认 = Obsidian 端独立 spawn `node dsh-acp.mjs`，完全绕开 dsh web
+// 加载 index.mjs 这一段 cordis fiber 死锁区。Obsidian Agent Client 配置 custom
+// agent = `node /path/to/dsh-acp.mjs` 即可（v0.2.x 原始设计），不再依赖 dsh web
+// 加载 index.mjs / DshAcpService 构造函数内的任何 ctx.on("app/ready") / setTimeout
+// 兜底。S6 详细根因与方案对比见踩坑经验 obsidian-dsh-acp-S6-cordis-event-lifecycle踩坑.md。
+
 import { Service } from "@deepseek-ai/cordis";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
 import { registerSessionPanelRoutes } from "./web/session-panel.mjs";
+import { registerHttpGateway } from "./lib/http-gateway.mjs";
+import { resolveRuntimeConfig, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
+import { hasP2Apis } from "./lib/version-detect.mjs";
 
 /**
  * Manages the dsh-acp ACP adapter subprocess for the harness and exposes the
@@ -64,11 +92,90 @@ export class DshAcpService extends Service {
 
 		if (config.spawn !== false) {
 			// Start the adapter once the harness app is ready.
-			ctx.on("app/ready", () => {
-				const useLong = config.runtime?.mode === "long";
+			//
+			// 2026-09-17 S6 fix: dsh 0.1.6-alpha.1 removed the `app/ready` cordis
+			// event (the web app no longer emits it — readiness is signalled by
+			// `loader.await()` resolving + connection+webServer services present,
+			// see @deepseek-ai/dsh-web-app/lib/index.js:213-216). We must await
+			// loader.await() ourselves instead of relying on ctx.on("app/ready").
+			//
+			// Implementation: 多次重试 `ctx.get("loader")`（cordis service lookup
+			// 在 plugin apply 时不一定就绪），拿到后 await()。失败 fallback
+			// 老路径 app/ready + 5s setTimeout 兜底，确保 0.1.5-rc.x 也 work。
+			let _bootTriggered = false;
+			const trigger = (reason) => {
+				if (_bootTriggered) return;
+				_bootTriggered = true;
+				_acpLog("info", `boot trigger: ${reason} — resolving runtime mode`);
+				const env = { ...process.env, DSH_IN_CORDIS: "1" };
+				if (config.runtime?.mode) env.DSH_ACP_RUNTIME_MODE = config.runtime.mode;
+				const rtConfig = resolveRuntimeConfig(env);
+				const useLong = rtConfig.mode === "long";
+				const msg = `effective runtime mode = ${rtConfig.mode} (P2 APIs available: ${hasP2Apis()}; spawnFallback: ${rtConfig.spawnFallback})`;
+				_acpLog("info", msg);
+				this.ctx?.logger?.info?.(`[dsh-acp] ${msg}`);
 				const boot = useLong ? this.startLong() : this.start();
-				boot.catch((err) => this.ctx?.logger?.error?.(String(err)));
-			});
+				boot
+					.then((rt) => {
+						_acpLog("info", `boot resolved: useLong=${useLong} rt=${rt ? rt.constructor.name : "null"}`);
+					})
+					.catch((err) => {
+						const errMsg = `startLong() failed (${err && err.message ? err.message : String(err)}); falling back to spawn`;
+						_acpLog("error", `boot REJECTED: ${err && err.stack ? err.stack : String(err)}`);
+						if (useLong && rtConfig.spawnFallback) {
+							_acpLog("warn", errMsg);
+							this.ctx?.logger?.warn?.(`[dsh-acp] ${errMsg}`);
+							return this.start().catch((e2) => {
+								_acpLog("error", `start() spawn fallback ALSO failed: ${e2 && e2.message ? e2.message : String(e2)}`);
+								throw e2;
+							});
+						}
+						_acpLog("error", String(err));
+						this.ctx?.logger?.error?.(String(err));
+					});
+			};
+
+			const tryLoaderAwait = (attempt = 0) => {
+				const loader = ctx.get?.("loader");
+				if (loader && typeof loader.await === "function") {
+					_acpLog("info", `loader service found (attempt ${attempt}); calling await()`);
+					loader
+						.await()
+						.then(() => trigger("loader.await() resolved"))
+						.catch((e) => _acpLog("error", `loader.await() rejected: ${e?.message ?? String(e)}`));
+					return true;
+				}
+				return false;
+			};
+
+			// 优先：用 inject 等 loader service
+			if (typeof ctx.inject === "function") {
+				ctx.inject(["loader"], (loaderCtx) => {
+					_acpLog("info", `ctx.inject([loader]) fired (loader=${loaderCtx?.loader?.constructor?.name})`);
+					if (!tryLoaderAwait(0)) {
+						_acpLog("warn", "loader service still missing after inject; falling back to polling + setTimeout");
+						// 兜底：轮询 + 老路径
+						let polls = 0;
+						const poll = setInterval(() => {
+							polls += 1;
+							if (tryLoaderAwait(polls)) clearInterval(poll);
+							else if (polls > 20) { clearInterval(poll); _acpLog("warn", "polling exhausted after 20 tries; using setTimeout fallback"); }
+						}, 250);
+						ctx.on("app/ready", () => trigger("legacy app/ready event"));
+						setTimeout(() => trigger("setTimeout 5s hard fallback"), 5000);
+					}
+				});
+			} else {
+				// 无 inject — 老路径
+				ctx.on("app/ready", () => trigger("legacy app/ready event (no inject)"));
+				setTimeout(() => trigger("setTimeout 5s (no inject)"), 5000);
+			}
+
+			// S6 fix 兜底：3s setTimeout 总是触发，不依赖任何 event / service 是否 ready。
+			// dsh 0.1.6-alpha.1 + cordis-plugin-loader 时序不确定（ctx.inject 回调可能
+			// 永远不触发），但 dsh web 整体 boot 后 3s 内一定可以 spawn 子进程。
+			// S4 测试验证：在 dsh web 起来后 3s 触发 trigger，能成功 spawn dsh-acp.mjs。
+			setTimeout(() => trigger("setTimeout 3s unconditional fallback"), 3000);
 		}
 
 		// Tie adapter shutdown to the owning fiber's disposal.
@@ -150,7 +257,6 @@ export class DshAcpService extends Service {
 	async startLong() {
 		if (this._longRt) return this._longRt;
 		const { getLongRuntime } = await import("./lib/long-runtime.mjs");
-		const { resolvePermissionConfig } = await import("./lib/runtime-switch.mjs");
 		const rt = getLongRuntime();
 		await rt.init({
 			cordisCtx: this.ctx,
@@ -210,6 +316,8 @@ const BACKOFF_MAX = 30000;
 
 /** Plugin identity and integrated config schema. */
 export const name = "dsh-acp";
+// 2026-09-17 S6: dsh-cost-meter 等参考实现都用空 inject + apply() 里 ctx.inject()。
+// 真正的 "我依赖 loader service" 声明在 apply() 里通过 ctx.inject(["loader"], ...) 做。
 export const inject = [];
 
 /** Config: `{ spawn?, adapterPath?, profile?, env?, runtime?, permission?, enableWebPanel? }`.
@@ -267,6 +375,13 @@ export function apply(ctx, config) {
 	// `ctx.on("dispose", () => this.stop())` — no separate listener here, so
 	// dispose ordering can never null t. process before stop() can SIGTERM it
 	// (REQ-06).
+	_acpLog("info", `plugin loaded (config=${JSON.stringify({ profile: config.profile, enableWebPanel: config.enableWebPanel, runtime: config.runtime, permission: config.permission })})`);
+
+	// 2026-09-17 S6 回滚：恢复 `new DshAcpService(ctx, config)` 正常路径。
+	// 选项 D 已确认 = Obsidian 端独立 spawn dsh-acp.mjs（见上注释 + 踩坑 doc），
+	// 不再需要 apply() 兜底同步 spawn。下游 web 面板路由 (ctx.inject(["webServer"]))
+	// 仍依赖 ctx，所以 svc 必须真是 DshAcpService 实例（不能是 stub），让 dispose
+	// 与 web 路由 hook 正常工作。
 	const svc = new DshAcpService(ctx, config);
 
 	// P1b web 面板路由：仅当 enableWebPanel=true 时挂载 /api-session/*（默认开）。
@@ -281,6 +396,11 @@ export function apply(ctx, config) {
 			if (webCtx && webCtx.webServer && typeof webCtx.webServer.register === "function") {
 				registerSessionPanelRoutes(ctx, webCtx.webServer);
 				ctx?.logger?.info?.("[dsh-acp] web 面板路由已注册: /api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}");
+				// P3.0 commit 2: 暴露 dsh-acp proxy 端点(probe + prompt SSE),让独立
+				// dsh-acp.mjs 进程能经 HTTP/SSE 调 long-runtime,无需 cordis ctx。
+				// 路由已挂载,long-runtime 仍 lazy init(在第一次 prompt 触发)。
+				registerHttpGateway(ctx, webCtx.webServer);
+				ctx?.logger?.info?.("[dsh-acp] HTTP gateway 已注册: /acp/proxy/{probe,session/prompt}");
 			}
 		});
 	}
