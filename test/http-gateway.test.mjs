@@ -20,6 +20,7 @@ import {
   createNotifyBridge,
   makeNotifyAcpClient,
   registerHttpGateway,
+  resolveHttpGatewayDefaultModel,
 } from "../lib/http-gateway.mjs";
 
 // --- HTTP_GATEWAY_VERSION -------------------------------------------------
@@ -254,4 +255,34 @@ test("POST /acp/proxy/session/prompt with empty body emits SSE error event", asy
   const text = writes.join("");
   assert.match(text, /event: error\n/);
   assert.match(text, /sessionId required/);
+});
+
+// --- resolveHttpGatewayDefaultModel ---------------------------------------
+
+// P3.0 follow-up (2026-09-17): ensureLongRuntime must seed long-runtime's
+// defaultModel so a freshly-created ACP session (no setSessionConfigOption
+// yet) can still run. Without this, every proxy-mode turn fails with
+//   "LongRuntime.prompt: no model configured"
+// observed in real-machine e2e. The fallback chain must match dsh-acp.mjs's
+// pickCurrentModel fallback so the two entry paths agree.
+
+test("resolveHttpGatewayDefaultModel: honors DSH_ACP_DEFAULT_MODEL env", () => {
+  assert.equal(
+    resolveHttpGatewayDefaultModel({ DSH_ACP_DEFAULT_MODEL: "minimax-cn/MiniMax-M2.7" }),
+    "minimax-cn/MiniMax-M2.7",
+  );
+});
+
+test("resolveHttpGatewayDefaultModel: falls back to jl-token/DeepSeek-V4-Flash", () => {
+  // Empty env (no override)
+  assert.equal(resolveHttpGatewayDefaultModel({}), "jl-token/DeepSeek-V4-Flash");
+});
+
+test("resolveHttpGatewayDefaultModel: ignores empty string env", () => {
+  // Empty string is falsy in JS — should still fall through to the default,
+  // not produce an empty model id (which would fail downstream too).
+  assert.equal(
+    resolveHttpGatewayDefaultModel({ DSH_ACP_DEFAULT_MODEL: "" }),
+    "jl-token/DeepSeek-V4-Flash",
+  );
 });
