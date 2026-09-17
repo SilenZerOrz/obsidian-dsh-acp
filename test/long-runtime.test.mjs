@@ -329,8 +329,10 @@ test("prompt: prepends history messages + appends user prompt", async () => {
     },
   });
   assert.equal(capturedOpts.messages.length, 3);
-  assert.equal(capturedOpts.messages[0].content, "first");
-  assert.equal(capturedOpts.messages[2].content, "second turn");
+  // dsh's LlmRuntime calls content.some(...), so all messages are normalized
+  // to parts arrays regardless of how the caller passed them.
+  assert.deepEqual(capturedOpts.messages[0].content, [{ type: "text", text: "first" }]);
+  assert.deepEqual(capturedOpts.messages[2].content, [{ type: "text", text: "second turn" }]);
 });
 
 // --- extractPromptText ----------------------------------------------------
@@ -368,7 +370,8 @@ test("buildStreamOptions: splits provider from a flattened 'provider/model' id",
   assert.equal(opts.model, "claude-3");
   assert.equal(opts.messages.length, 1);
   assert.equal(opts.messages[0].role, "user");
-  assert.equal(opts.messages[0].content, "hi");
+  // dsh's LlmRuntime calls content.some(...), so content MUST be a parts array.
+  assert.deepEqual(opts.messages[0].content, [{ type: "text", text: "hi" }]);
 });
 
 test("buildStreamOptions: defaults provider to 'default' and keeps bare model id", () => {
@@ -407,6 +410,59 @@ test("buildStreamOptions: throws when no model is resolvable", () => {
       }),
     /no model configured/,
   );
+});
+
+// --- normalizeMessage (regression for dsh content.some bug) ---------------
+
+test("buildStreamOptions: wraps history[i].content string into parts array", () => {
+  // Regression (2026-09-17): dsh's LlmRuntime calls content.some(...) on every
+  // message; passing a plain string content produced a terminal
+  //   failure: { message: "content.some is not a function", code: "UNKNOWN" }
+  // chunk that the bridge silently mapped to stopReason:"cancelled". All
+  // messages (history + new user turn) must be normalized to parts arrays.
+  const opts = buildStreamOptions({
+    promptText: "what's up",
+    sessionConfig: { model: "default/m" },
+    defaultModel: null,
+    history: [
+      { role: "user", content: "previous question" },
+      { role: "assistant", content: "previous answer" },
+    ],
+    cwd: "/tmp",
+  });
+  assert.equal(opts.messages.length, 3);
+  for (const m of opts.messages) {
+    assert.ok(Array.isArray(m.content), `expected content array, got ${typeof m.content}`);
+    assert.equal(m.content.length, 1);
+    assert.equal(m.content[0].type, "text");
+    assert.equal(typeof m.content[0].text, "string");
+  }
+  assert.equal(opts.messages[2].content[0].text, "what's up");
+});
+
+test("buildStreamOptions: preserves history messages whose content is already a parts array", () => {
+  const opts = buildStreamOptions({
+    promptText: "describe image",
+    sessionConfig: { model: "default/m" },
+    defaultModel: null,
+    history: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "what is in this image?" },
+          { type: "image", source: { type: "base64", data: "abc" } },
+        ],
+      },
+    ],
+    cwd: "/tmp",
+  });
+  assert.equal(opts.messages.length, 2);
+  // History content is passed through unchanged (still 2 parts).
+  assert.equal(opts.messages[0].content.length, 2);
+  assert.equal(opts.messages[0].content[0].type, "text");
+  assert.equal(opts.messages[0].content[1].type, "image");
+  // New user turn still gets the string → parts conversion.
+  assert.deepEqual(opts.messages[1].content, [{ type: "text", text: "describe image" }]);
 });
 
 test("buildStreamOptions: omits temperature/reasoningEffort when not set", () => {
