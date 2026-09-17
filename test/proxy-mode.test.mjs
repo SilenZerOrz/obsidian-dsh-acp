@@ -25,8 +25,8 @@ import {
 
 // --- Constants ------------------------------------------------------------
 
-test("PROXY_DEFAULT_BASE_URL is http://127.0.0.1:18789", () => {
-  assert.equal(PROXY_DEFAULT_BASE_URL, "http://127.0.0.1:18789");
+test("PROXY_DEFAULT_BASE_URL is http://127.0.0.1:3080 (matches launchd dsh-web plist port)", () => {
+  assert.equal(PROXY_DEFAULT_BASE_URL, "http://127.0.0.1:3080");
 });
 
 test("PROBE_TIMEOUT_MS is short (2s)", () => {
