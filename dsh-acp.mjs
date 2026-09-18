@@ -672,6 +672,16 @@ function createAgent() {
                 process.stderr.write(`[dsh-acp] proxy→ctx notify failed: ${e?.message ?? e}\n`);
               }
             },
+            // P3.0 tool-call fix (2026-09-18): server emits SSE "request"
+            // events when long-runtime needs to call acpClient.request (e.g.
+            // session/request_permission). Forward them to ctx.client.request
+            // so the user can answer via Obsidian's permission prompt UI.
+            onRequest: async (method, p) => {
+              if (!ctx?.client) {
+                throw new Error("no ACP client available for server request");
+              }
+              return await ctx.client.request(method, p);
+            },
           });
         } catch (e) {
           process.stderr.write(`[dsh-acp] proxy forward failed: ${e?.message ?? e}; client will see end_turn\n`);

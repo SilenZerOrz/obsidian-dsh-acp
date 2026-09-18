@@ -331,3 +331,170 @@ test("forwardPromptViaHttp: pre-aborted signal aborts immediately", async () => 
     restore();
   }
 });
+
+// --- forwardPromptViaHttp SSE "request" event (P3.0 tool-call fix) ------
+
+test("forwardPromptViaHttp: SSE 'request' event forwards to onRequest + POSTs reply to /acp/proxy/permission-response", async () => {
+  // Server-side story:
+  //   1. Emit one sessionUpdate (LLM said "hi")
+  //   2. Emit one "request" event (long-runtime needs permission)
+  //   3. Expect the proxy client to POST to /acp/proxy/permission-response
+  //   4. After the POST, the server (this mock) emits "result" and closes
+  //
+  // We model the mock fetch to inspect /acp/proxy/permission-response and
+  // route the SECOND fetch call there; the FIRST is the prompt stream itself.
+  let fetchCallIndex = 0;
+  const observedPermissionBodies = [];
+  const restore = withMockFetch(async (url, init = {}) => {
+    fetchCallIndex++;
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      // The session-update + permission request + result stream.
+      const sse =
+        "event: sessionUpdate\n" +
+        "data: {\"method\":\"session/update\",\"params\":{\"x\":1}}\n\n" +
+        "event: request\n" +
+        "data: {\"correlationId\":\"req-test-1\",\"method\":\"session/request_permission\",\"params\":{\"toolCallId\":\"tc1\"}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":1,\"inputTokens\":1,\"outputTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    const updates = [];
+    let onRequestCalled = null;
+    const result = await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: (method, params) => updates.push({ method, params }),
+      onRequest: async (method, params) => {
+        onRequestCalled = { method, params };
+        return { outcome: { outcome: "selected", optionId: "allow_once" } };
+      },
+    });
+    // sessionUpdate was forwarded
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].params.x, 1);
+    // onRequest was invoked with the server's method + params
+    assert.deepEqual(onRequestCalled, {
+      method: "session/request_permission",
+      params: { toolCallId: "tc1" },
+    });
+    // The reply POST carried ok=true + the result + the correlationId
+    assert.equal(observedPermissionBodies.length, 1);
+    assert.deepEqual(observedPermissionBodies[0], {
+      ok: true,
+      sessionId: "sess-1",
+      correlationId: "req-test-1",
+      result: { outcome: { outcome: "selected", optionId: "allow_once" } },
+    });
+    // Result envelope resolved
+    assert.equal(result.stopReason, "end_turn");
+  } finally {
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: onRequest throwing → POST reply with ok=false + error", async () => {
+  const observedPermissionBodies = [];
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      const sse =
+        "event: request\n" +
+        "data: {\"correlationId\":\"req-x\",\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: () => {},
+      onRequest: async () => {
+        throw new Error("no ACP client available");
+      },
+    });
+    assert.equal(observedPermissionBodies.length, 1);
+    assert.equal(observedPermissionBodies[0].ok, false);
+    assert.match(observedPermissionBodies[0].error, /no ACP client available/);
+  } finally {
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: missing onRequest + 'request' event → reply with default error", async () => {
+  const observedPermissionBodies = [];
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      const sse =
+        "event: request\n" +
+        "data: {\"correlationId\":\"req-y\",\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }
+    throw new Error("unexpected fetch: " + url);
+  });
+  try {
+    await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: () => {},
+      // onRequest intentionally omitted — proxy should still gracefully reply.
+    });
+    assert.equal(observedPermissionBodies.length, 1);
+    assert.equal(observedPermissionBodies[0].ok, false);
+    assert.match(observedPermissionBodies[0].error, /no onRequest handler/);
+  } finally {
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: SSE 'request' missing correlationId logs and skips POST", async () => {
+  let fetchCalls = 0;
+  const restore = withMockFetch(async (url) => {
+    fetchCalls++;
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      const sse =
+        "event: request\n" +
+        "data: {\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    throw new Error("should not have made a permission-response POST: " + url);
+  });
+  try {
+    await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: () => {},
+      onRequest: async () => ({ outcome: { outcome: "selected", optionId: "allow_once" } }),
+    });
+    assert.equal(fetchCalls, 1, "only the prompt fetch should fire");
+  } finally {
+    restore();
+  }
+});

@@ -19,6 +19,7 @@ import {
   SseWriter,
   createNotifyBridge,
   makeNotifyAcpClient,
+  makePerPromptAcpClient,
   registerHttpGateway,
   resolveHttpGatewayDefaultModel,
 } from "../lib/http-gateway.mjs";
@@ -115,13 +116,139 @@ test("makeNotifyAcpClient.notify() routes through bridge emitter", async () => {
   });
 });
 
-test("makeNotifyAcpClient.request() throws (v1 stub — no bidirectional wire)", async () => {
+test("makeNotifyAcpClient.request() throws (bridge-level client is notify-only)", async () => {
+  // P3.0 follow-up (2026-09-18): request() needs per-writer closure for
+  // routing — the bridge-level notify-only client must reject request() so
+  // callers know to use makePerPromptAcpClient(writer) instead.
   const bridge = createNotifyBridge();
   const client = makeNotifyAcpClient(bridge);
   await assert.rejects(
     () => client.request("session/request_permission", {}),
-    /not wired in commit 1/,
+    /not wired for this acpClient/,
   );
+});
+
+// --- SseWriter.emitRequest / resolveRequest / rejectAllPending -----------
+
+test("SseWriter.emitRequest emits SSE 'request' event with correlationId", () => {
+  const writes = [];
+  const res = { write: (chunk) => writes.push(chunk) };
+  const w = new SseWriter(res);
+  // Don't await — just confirm the emit happens synchronously before any reply.
+  const promise = w.emitRequest("session/request_permission", { toolCallId: "tc1" });
+  assert.equal(writes.length, 2);
+  assert.match(writes[0], /^event: request\n$/);
+  // Parse the data line to grab the correlationId
+  const m = writes[1].match(/^data: (\{.*\})\n\n$/);
+  assert.ok(m, "data line should be JSON");
+  const payload = JSON.parse(m[1]);
+  assert.equal(payload.method, "session/request_permission");
+  assert.deepEqual(payload.params, { toolCallId: "tc1" });
+  assert.match(payload.correlationId, /^req-\d+-[a-z0-9]+$/);
+  // Don't resolve — let it dangle (will reject on close below).
+  promise.catch(() => {}); // silence unhandled
+  w.close();
+});
+
+test("SseWriter.resolveRequest resolves the matching pending Promise", async () => {
+  const writes = [];
+  const res = { write: (chunk) => writes.push(chunk), end: () => {} };
+  const w = new SseWriter(res);
+  const p = w.emitRequest("session/request_permission", { toolCallId: "tc1" });
+  // Extract correlationId from the emitted data line.
+  const dataLine = writes[1];
+  const m = dataLine.match(/^data: (\{.*\})\n\n$/);
+  const { correlationId } = JSON.parse(m[1]);
+  const ok = w.resolveRequest(correlationId, { ok: true, result: { outcome: "allow" } });
+  assert.equal(ok, true);
+  const result = await p;
+  assert.deepEqual(result, { outcome: "allow" });
+});
+
+test("SseWriter.resolveRequest returns false for unknown correlationId", () => {
+  const writes = [];
+  const res = { write: () => {}, end: () => {} };
+  const w = new SseWriter(res);
+  const ok = w.resolveRequest("nonexistent", { ok: true, result: 1 });
+  assert.equal(ok, false);
+});
+
+test("SseWriter.resolveRequest rejects Promise when reply.ok=false", async () => {
+  const writes = [];
+  const res = { write: (chunk) => writes.push(chunk), end: () => {} };
+  const w = new SseWriter(res);
+  const p = w.emitRequest("session/request_permission", {});
+  const dataLine = writes[1];
+  const m = dataLine.match(/^data: (\{.*\})\n\n$/);
+  const { correlationId } = JSON.parse(m[1]);
+  w.resolveRequest(correlationId, { ok: false, error: "user denied" });
+  await assert.rejects(() => p, /user denied/);
+});
+
+test("SseWriter.close rejects all pending requests", async () => {
+  const res = { write: () => {}, end: () => {} };
+  const w = new SseWriter(res);
+  const p1 = w.emitRequest("session/request_permission", {});
+  const p2 = w.emitRequest("session/request_permission", {});
+  w.close();
+  await assert.rejects(() => p1, /SSE writer closed/);
+  await assert.rejects(() => p2, /SSE writer closed/);
+});
+
+test("SseWriter.emitRequest after close rejects synchronously", async () => {
+  const res = { write: () => {}, end: () => {} };
+  const w = new SseWriter(res);
+  w.close();
+  await assert.rejects(() => w.emitRequest("session/request_permission", {}), /closed/);
+});
+
+// --- createNotifyBridge sessionId routing --------------------------------
+
+test("createNotifyBridge.findWriterBySession returns the attached writer", () => {
+  const bridge = createNotifyBridge();
+  const writer = new SseWriter({ write: () => {}, end: () => {} });
+  bridge.attachWriter(writer, "sess-1");
+  const found = bridge.findWriterBySession("sess-1");
+  assert.equal(found, writer);
+  bridge.detachWriter(writer);
+  assert.equal(bridge.findWriterBySession("sess-1"), undefined);
+});
+
+test("createNotifyBridge.findWriterBySession returns undefined for unknown session", () => {
+  const bridge = createNotifyBridge();
+  assert.equal(bridge.findWriterBySession("nope"), undefined);
+});
+
+test("createNotifyBridge.findWriterBySession returns undefined for empty sessionId", () => {
+  const bridge = createNotifyBridge();
+  assert.equal(bridge.findWriterBySession(""), undefined);
+  assert.equal(bridge.findWriterBySession(null), undefined);
+});
+
+// --- makePerPromptAcpClient ----------------------------------------------
+
+test("makePerPromptAcpClient.notify emits sessionUpdate on the captured writer", async () => {
+  const writes = [];
+  const w = new SseWriter({ write: (c) => writes.push(c), end: () => {} });
+  const client = makePerPromptAcpClient(w);
+  await client.notify("session/update", { sessionId: "x" });
+  assert.equal(writes.length, 2);
+  assert.match(writes[0], /^event: sessionUpdate\n$/);
+  assert.match(writes[1], /^data: \{"method":"session\/update"/);
+});
+
+test("makePerPromptAcpClient.request emits 'request' SSE event and awaits reply", async () => {
+  const writes = [];
+  const w = new SseWriter({ write: (c) => writes.push(c), end: () => {} });
+  const client = makePerPromptAcpClient(w);
+  // Caller side: simulate onRequest returning a result + manual resolve.
+  const requestPromise = client.request("session/request_permission", { toolCallId: "tc1" });
+  const dataLine = writes[1];
+  const m = dataLine.match(/^data: (\{.*\})\n\n$/);
+  const { correlationId } = JSON.parse(m[1]);
+  w.resolveRequest(correlationId, { ok: true, result: { outcome: "selected", optionId: "allow_once" } });
+  const result = await requestPromise;
+  assert.deepEqual(result, { outcome: "selected", optionId: "allow_once" });
 });
 
 // --- registerHttpGateway (with mock webServer) ----------------------------
