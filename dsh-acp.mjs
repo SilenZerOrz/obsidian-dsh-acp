@@ -20,6 +20,7 @@
 //     own conversation archive can read the ACP sessions back.
 
 import { agent as acpAgent, methods, ndJsonStream, RequestError } from "@agentclientprotocol/sdk";
+import { z as zod } from "zod";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
@@ -44,6 +45,74 @@ import {
   shouldAttemptProxy,
   getProxyBaseUrl as _getProxyBaseUrl,
 } from "./lib/proxy-mode.mjs";
+
+// ---- Permissive params schemas (ACP SDK compatibility) --------------------
+// The @agentclientprotocol/sdk 1.4.0 strict Zod schema for session/new +
+// session/load REQUIRES `mcpServers: zMcpServer[]` even though the protocol
+// says clients SHOULD send it (not MUST) and most clients (including
+// Obsidian Agent Client as of 2026-09-18) omit it. The strict schema makes
+// the SDK reject every session/new with:
+//   "Invalid params: mcpServers Required value is missing"
+// BEFORE the handler runs — the user-visible symptom is the Obsidian UI
+// shows nothing happening after initialize (no sessionId, no prompts work,
+// the chat input stays disabled).
+//
+// Fix: register each ACP request handler with a custom permissive params
+// schema via `.request({ method, params: <zod> }, handler)` instead of the
+// default `.onRequest(method, handler)` shorthand. The permissive schema
+// only enforces `cwd: string` and lets everything else (mcpServers, _meta,
+// additionalDirectories) be optional / default to empty.
+//
+// The `passThrough = zod.object({}).passthrough()` keeps unknown fields
+// intact so downstream handlers still see them.
+
+const passThrough = zod.object({}).passthrough();
+const permissiveString = zod.string().optional();
+
+/** Permissive session/new params — only `cwd` required, `mcpServers` defaults to []. */
+const permissiveNewSession = zod.object({
+  cwd: zod.string(),
+  mcpServers: zod.array(passThrough).optional().default([]),
+  additionalDirectories: zod.array(zod.string()).optional().default([]),
+  _meta: passThrough.optional(),
+}).passthrough();
+
+/** Permissive session/load params — only `sessionId` + `cwd` required. */
+const permissiveLoadSession = zod.object({
+  sessionId: zod.string(),
+  cwd: zod.string(),
+  mcpServers: zod.array(passThrough).optional().default([]),
+  additionalDirectories: zod.array(zod.string()).optional().default([]),
+  _meta: passThrough.optional(),
+}).passthrough();
+
+/** Permissive session/prompt params — only `sessionId` + `prompt` required. */
+const permissivePrompt = zod.object({
+  sessionId: zod.string(),
+  prompt: zod.union([zod.string(), zod.array(passThrough), passThrough]).optional(),
+  _meta: passThrough.optional(),
+}).passthrough();
+
+/** Permissive setConfigOption params — only `sessionId` + `configId` + `value` required. */
+const permissiveSetConfigOption = zod.object({
+  sessionId: zod.string(),
+  configId: zod.string(),
+  value: zod.union([zod.string(), zod.number(), zod.boolean(), passThrough]).optional(),
+  _meta: passThrough.optional(),
+}).passthrough();
+
+/** Permissive setMode params. */
+const permissiveSetMode = zod.object({
+  sessionId: zod.string(),
+  modeId: zod.string(),
+  _meta: passThrough.optional(),
+}).passthrough();
+
+/** Permissive authenticate / logout — accept any object. */
+const permissiveAuth = passThrough;
+
+/** Permissive listSessions / fork / resume / close / cancel — accept any object. */
+const permissiveAny = passThrough;
 
 // ---- Configuration -------------------------------------------------------
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
@@ -489,7 +558,11 @@ function createAgent() {
       // session/list 复活。失败不影响列表返回。见 gc.mjs。
       try {
         const gc = gcBeforeList();
-        if (gc.removed && gc.removed.length) console.log(`gc: cleaned ${gc.removed.length} orphan session(s)`);
+        // CRITICAL: write to stderr, NOT stdout — stdout is the ACP JSON-RPC
+        // channel. A stray `console.log` here was corrupting Obsidian's first
+        // JSON-RPC parse (root cause of "Obsidian UI sees no progress" —
+        // the JSON-RPC framing went off-rail before session/new ever landed).
+        if (gc.removed && gc.removed.length) process.stderr.write(`[dsh-acp] gc: cleaned ${gc.removed.length} orphan session(s)\n`);
       } catch (e) { /* 不阻塞列表 */ }
       const cwd = params.cwd ?? process.cwd();
       const sessions = listSessionRecords(cwd).map((s) => ({
@@ -867,26 +940,28 @@ function runAcp() {
 			process.stderr.write(`[dsh-acp] probe exception: ${e?.message ?? e}; spawn mode\n`);
 		});
 	}
+	// 自然退出 - 8s 后强退,保证所有 timer fire
+//	setTimeout(() => { process.stderr.write(`[dsh-acp] DIAG: 8s timeout exit\n`); process.exit(0); }, 8000);
 
 	const input = nodeToWebWritable(process.stdout);
   const output = nodeToWebReadable(process.stdin);
   const stream = ndJsonStream(input, output);
   const h = createAgent();
   const connection = acpAgent({ name: "dsh-acp" })
-    .onRequest(methods.agent.initialize, (ctx) => h.initialize(ctx.params))
-    .onRequest(methods.agent.session.new, (ctx) => h.newSession(ctx.params))
-    .onRequest(methods.agent.session.load, (ctx) => h.loadSession(ctx.params))
-    .onRequest(methods.agent.session.list, (ctx) => h.listSessions(ctx.params))
-    .onRequest(methods.agent.session.delete, (ctx) => h.deleteSession(ctx.params))
-    .onRequest(methods.agent.session.resume, (ctx) => h.resumeSession(ctx.params))
-    .onRequest(methods.agent.session.fork, (ctx) => h.forkSession(ctx.params))
-    .onRequest(methods.agent.session.close, (ctx) => h.closeSession(ctx.params))
-    .onRequest(methods.agent.session.setMode, (ctx) => h.setSessionMode(ctx.params))
-    .onRequest(methods.agent.session.setConfigOption, (ctx) => h.setSessionConfigOption(ctx.params))
-    .onRequest(methods.agent.authenticate, (ctx) => h.authenticate(ctx.params))
-    .onRequest(methods.agent.logout, (ctx) => h.logout(ctx.params))
-    .onRequest(methods.agent.session.prompt, (ctx) => h.prompt(ctx.params, ctx))
-    .onNotification(methods.agent.session.cancel, (ctx) => h.cancel(ctx.params))
+    .request({ method: methods.agent.initialize, params: permissiveAny }, (ctx) => h.initialize(ctx.params))
+    .request({ method: methods.agent.session.new, params: permissiveNewSession }, (ctx) => h.newSession(ctx.params))
+    .request({ method: methods.agent.session.load, params: permissiveLoadSession }, (ctx) => h.loadSession(ctx.params))
+    .request({ method: methods.agent.session.list, params: permissiveAny }, (ctx) => h.listSessions(ctx.params))
+    .request({ method: methods.agent.session.delete, params: permissiveAny }, (ctx) => h.deleteSession(ctx.params))
+    .request({ method: methods.agent.session.resume, params: permissiveAny }, (ctx) => h.resumeSession(ctx.params))
+    .request({ method: methods.agent.session.fork, params: permissiveAny }, (ctx) => h.forkSession(ctx.params))
+    .request({ method: methods.agent.session.close, params: permissiveAny }, (ctx) => h.closeSession(ctx.params))
+    .request({ method: methods.agent.session.setMode, params: permissiveSetMode }, (ctx) => h.setSessionMode(ctx.params))
+    .request({ method: methods.agent.session.setConfigOption, params: permissiveSetConfigOption }, (ctx) => h.setSessionConfigOption(ctx.params))
+    .request({ method: methods.agent.authenticate, params: permissiveAuth }, (ctx) => h.authenticate(ctx.params))
+    .request({ method: methods.agent.logout, params: permissiveAuth }, (ctx) => h.logout(ctx.params))
+    .request({ method: methods.agent.session.prompt, params: permissivePrompt }, (ctx) => h.prompt(ctx.params, ctx))
+    .notification({ method: methods.agent.session.cancel, params: permissiveAny }, (ctx) => h.cancel(ctx.params))
     .connect(stream);
   connection.closed.then(() => { flushPersist(); process.exit(0); });
   // Flush any debounced index write before exiting (REQ-02 durability).
