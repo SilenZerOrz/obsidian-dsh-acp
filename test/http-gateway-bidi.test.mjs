@@ -212,6 +212,92 @@ test("bidi: onRequest error → permission-response with ok=false → request() 
   }
 });
 
+// =====================================================================
+// Phase E (2026-09-18): AbortSignal-aware SseWriter + bidi abort paths
+// =====================================================================
+//
+// Without these tests, a silent Obsidian Agent Client could strand the
+// SseWriter._pendingRequests Map forever. The emitRequest signal arg +
+// the matching client-side abortOnSignal in proxy-mode.mjs are what close
+// the loop. These tests lock the contract end-to-end.
+
+import { SseWriter } from "../lib/http-gateway.mjs";
+
+/** Fake http.ServerResponse shim — SseWriter only calls .write(). */
+function makeFakeRes() {
+  return { write: () => true };
+}
+
+test("SseWriter.emitRequest: signal abort mid-flight rejects with AbortError and removes the entry", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const ctl = new AbortController();
+  const p = writer.emitRequest("session/request_permission", { toolCallId: "tc" }, ctl.signal);
+  assert.equal(writer._pendingRequests.size, 1, "pending entry registered");
+  ctl.abort();
+  await assert.rejects(p, (err) => err && err.name === "AbortError");
+  assert.equal(writer._pendingRequests.size, 0, "abort must remove the pending entry");
+});
+
+test("SseWriter.emitRequest: pre-aborted signal rejects without registering an entry", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const ctl = new AbortController();
+  ctl.abort();
+  await assert.rejects(
+    writer.emitRequest("session/request_permission", {}, ctl.signal),
+    (err) => err && err.name === "AbortError",
+  );
+  assert.equal(writer._pendingRequests.size, 0, "pre-aborted must NOT register a pending entry");
+});
+
+test("SseWriter.emitRequest: success resolves and removes the entry (listener cleanup)", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const ctl = new AbortController();
+  const p = writer.emitRequest("session/request_permission", {}, ctl.signal);
+  assert.equal(writer._pendingRequests.size, 1);
+  // Grab the correlationId from the registered entry.
+  const correlationId = writer._pendingRequests.keys().next().value;
+  writer.resolveRequest(correlationId, { ok: true, result: { outcome: "allow_once" } });
+  const result = await p;
+  assert.deepEqual(result, { outcome: "allow_once" });
+  assert.equal(writer._pendingRequests.size, 0, "success branch removes the entry");
+  // Trigger abort — should NOT raise an unhandled rejection (listener gone).
+  ctl.abort();
+});
+
+test("SseWriter.emitRequest: failure (ok:false) removes the entry and rejects", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const ctl = new AbortController();
+  const p = writer.emitRequest("session/request_permission", {}, ctl.signal);
+  const correlationId = writer._pendingRequests.keys().next().value;
+  writer.resolveRequest(correlationId, { ok: false, error: "user said no" });
+  await assert.rejects(p, /user said no/);
+  assert.equal(writer._pendingRequests.size, 0);
+  ctl.abort(); // listener cleanup verification — no unhandled rejection
+});
+
+test("SseWriter.rejectAllPending: clears _pendingRequests and rejects all", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const p1 = writer.emitRequest("session/request_permission", {});
+  const p2 = writer.emitRequest("session/request_permission", {});
+  assert.equal(writer._pendingRequests.size, 2);
+  writer.rejectAllPending("writer going away");
+  await assert.rejects(p1, /writer going away/);
+  await assert.rejects(p2, /writer going away/);
+  assert.equal(writer._pendingRequests.size, 0);
+});
+
+test("SseWriter.emitRequest: abort then late-arriving reply is a no-op (404 path is the consumer's job)", async () => {
+  const writer = new SseWriter(makeFakeRes());
+  const ctl = new AbortController();
+  const p = writer.emitRequest("session/request_permission", {}, ctl.signal);
+  const correlationId = writer._pendingRequests.keys().next().value;
+  ctl.abort();
+  await assert.rejects(p, (e) => e.name === "AbortError");
+  // Late reply — should resolve to false (no entry to find). This mirrors
+  // what handlePermissionResponse would see at the HTTP layer.
+  assert.equal(writer.resolveRequest(correlationId, { ok: true, result: "ignored" }), false);
+});
+
 /**
  * Poll the long-runtime's registered per-prompt client to discover when an
  * SSE "request" has been emitted, and capture its correlationId. This mirrors

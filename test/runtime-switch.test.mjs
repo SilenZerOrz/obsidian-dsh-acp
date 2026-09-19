@@ -57,6 +57,17 @@ test("resolveRuntimeMode: standalone binary default is spawn", () => {
   assert.equal(resolveRuntimeMode({}), "spawn");
 });
 
+test("resolveRuntimeMode: official bridge forces spawn (legacy hooks must not boot on apply()'s ctx)", () => {
+  // DSH_ACP_USE_OFFICIAL_BRIDGE=1 owns the in-process ctx for apply() prompt
+  // routing; legacy long-runtime must NOT boot (its agent/pre-step listener
+  // collapses apply()'s pre-step chain). Every mode that would otherwise be
+  // "long" must downgrade to spawn.
+  assert.equal(resolveRuntimeMode({ DSH_ACP_USE_OFFICIAL_BRIDGE: "1" }), "spawn");
+  assert.equal(resolveRuntimeMode({ DSH_ACP_USE_OFFICIAL_BRIDGE: "1", DSH_IN_CORDIS: "1" }), "spawn");
+  // Even an explicit long override is overridden by the official bridge.
+  assert.equal(resolveRuntimeMode({ DSH_ACP_USE_OFFICIAL_BRIDGE: "1", DSH_ACP_RUNTIME_MODE: "long" }), "spawn");
+});
+
 test("resolveRuntimeMode: unknown env values fall through", () => {
   assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "weird" }), "spawn");
   assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "0" }), "spawn");
@@ -86,9 +97,13 @@ test("RUNTIME_DEFAULTS is frozen and matches spec", () => {
 // --- resolvePermissionConfig ---------------------------------------------
 
 test("resolvePermissionConfig: defaults match PERMISSION_DEFAULTS", () => {
+  // Phase B (2026-09-18): timeoutMs is gone from defaults — PermissionGate
+  // no longer consumes a wall-clock value (replaced by AbortSignal-driven
+  // raceWithAbort). The field may still appear when DSH_ACP_PERMISSION_TIMEOUT_MS
+  // is explicitly set, but defaults resolve to undefined.
   const cfg = resolvePermissionConfig({});
   assert.equal(cfg.mode, PERMISSION_DEFAULTS.mode);
-  assert.equal(cfg.timeoutMs, PERMISSION_DEFAULTS.timeoutMs);
+  assert.equal(cfg.timeoutMs, undefined);
   assert.deepEqual(cfg.editTools, PERMISSION_DEFAULTS.editTools);
 });
 
@@ -99,10 +114,14 @@ test("resolvePermissionConfig: explicit mode wins, invalid falls back to default
   assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_MODE: "nonsense" }).mode, "default");
 });
 
-test("resolvePermissionConfig: timeoutMs honors env, falls back on garbage", () => {
+test("resolvePermissionConfig: timeoutMs honors env when valid, undefined otherwise", () => {
+  // Phase B: timeoutMs is deprecated. We still parse it from env for back-compat
+  // diagnostic tooling, but garbage / empty now resolves to undefined (no
+  // fallback to PERMISSION_DEFAULTS — the defaults object no longer carries it).
   assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_TIMEOUT_MS: "60000" }).timeoutMs, 60000);
-  assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_TIMEOUT_MS: "abc" }).timeoutMs, PERMISSION_DEFAULTS.timeoutMs);
-  assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_TIMEOUT_MS: "" }).timeoutMs, PERMISSION_DEFAULTS.timeoutMs);
+  assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_TIMEOUT_MS: "abc" }).timeoutMs, undefined);
+  assert.equal(resolvePermissionConfig({ DSH_ACP_PERMISSION_TIMEOUT_MS: "" }).timeoutMs, undefined);
+  assert.equal(resolvePermissionConfig({}).timeoutMs, undefined);
 });
 
 test("resolvePermissionConfig: editTools parsing", () => {
@@ -117,8 +136,10 @@ test("resolvePermissionConfig: editTools parsing", () => {
 });
 
 test("PERMISSION_DEFAULTS is frozen and matches spec", () => {
+  // Phase B (2026-09-18): timeoutMs removed from defaults (no wall-clock
+  // 5-min race; replaced by AbortSignal-driven raceWithAbort).
   assert.equal(PERMISSION_DEFAULTS.mode, "default");
-  assert.equal(PERMISSION_DEFAULTS.timeoutMs, 300000);
+  assert.equal(PERMISSION_DEFAULTS.timeoutMs, undefined);
   assert.ok(PERMISSION_DEFAULTS.editTools.includes("Edit"));
   assert.ok(Object.isFrozen(PERMISSION_DEFAULTS));
 });

@@ -49,7 +49,10 @@ test("runtime.mode + permission.mode accept documented enum values", async () =>
   assert.equal(okRuntime.runtime.mode, "spawn", "default runtime.mode must be 'spawn'");
   assert.equal(okRuntime.runtime.spawnFallback, true);
   assert.equal(okRuntime.permission.mode, "default", "default permission.mode must be 'default'");
-  assert.equal(okRuntime.permission.timeoutMs, 300000);
+  // Phase B (2026-09-18): timeoutMs is no longer in defaults — PermissionGate
+  // cancellation now flows via AbortSignal, not a wall-clock timer.
+  assert.equal(okRuntime.permission.timeoutMs, undefined);
+  assert.equal(okRuntime.permission.enableRootBypass, false);
   assert.deepEqual(okRuntime.permission.editTools, ["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
   // Long mode + bypassPermissions — must accept without throwing.

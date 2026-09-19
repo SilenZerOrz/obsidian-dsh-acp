@@ -124,7 +124,7 @@ const permissiveAny = passThrough;
 // native apps), we ALSO probe a few well-known install locations when DSH_BIN
 // is unset, instead of relying on the bare "dsh" name resolving on PATH.
 // This fixes "spawn dsh ENOENT" when the adapter runs under a minimal env.
-import { accessSync, constants as fsConstants, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, mkdtempSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, join as joinPath } from "node:path";
 
@@ -258,8 +258,26 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
       patchInfo = modelPatchArgs(model, provider);
       args.splice(args.length - 1, 0, "--patch", patchInfo.file);
     }
+    const effectiveCwd = cwd || process.cwd();
+    // Bug B (2026-09-19, #63): pre-validate cwd so spawn doesn't fail with a
+    // cryptic Node ENOENT/ENOTDIR/EACCES when the ACP client passes a stale
+    // savedSession cwd (e.g. /Users/admin/... after a rename). Throw a clear,
+    // client-actionable error that includes the offending path so the
+    // Obsidian Agent Client can surface a real diagnostic instead of the
+    // generic "I cannot access local files" placeholder.
+    try {
+      const st = statSync(effectiveCwd);
+      if (!st.isDirectory()) {
+        return reject(new Error(`dsh-acp: cwd is not a directory: ${effectiveCwd}`));
+      }
+    } catch (e) {
+      if (e.code === "ENOENT") {
+        return reject(new Error(`dsh-acp: cwd does not exist: ${effectiveCwd}`));
+      }
+      return reject(new Error(`dsh-acp: cwd is not accessible (${e.code ?? e.message}): ${effectiveCwd}`));
+    }
     const child = spawn(DSH_BIN, args, {
-      cwd: cwd || process.cwd(),
+      cwd: effectiveCwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -301,6 +319,42 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
   });
 }
 
+// Bug C (2026-09-19, #63): pre-validate ACP session cwd params so a stale
+// savedSession path (e.g. /Users/admin/... after a rename) is rejected at the
+// session/new|load|fork boundary with a clear InvalidParams error instead of
+// propagating into runDsh() and bubbling up as an opaque spawn failure.
+/**
+ * @param {unknown} cwd
+ * @param {string} opName  e.g. "session/new"
+ * @returns {string|undefined} the cwd to use, or undefined to signal "no cwd
+ *   supplied, fall back to process.cwd()".
+ * @throws {RequestError} when cwd is non-empty, absolute, but missing or not
+ *   a directory — surfaces to the ACP client as InvalidParams.
+ */
+function validateCwdParam(cwd, opName) {
+  if (cwd === undefined || cwd === null || cwd === "") return undefined;
+  if (typeof cwd !== "string" || !isAbsolute(cwd)) {
+    throw new RequestError(
+      `${opName}: cwd must be an absolute path (got ${JSON.stringify(cwd)})`,
+    );
+  }
+  let st;
+  try {
+    st = statSync(cwd);
+  } catch (e) {
+    if (e.code === "ENOENT") {
+      throw new RequestError(`${opName}: cwd does not exist: ${cwd}`);
+    }
+    throw new RequestError(
+      `${opName}: cwd not accessible (${e.code ?? e.message}): ${cwd}`,
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new RequestError(`${opName}: cwd is not a directory: ${cwd}`);
+  }
+  return cwd;
+}
+
 // ---- ACP helpers ---------------------------------------------------------
 function notifyUpdate(client, sessionId, update) {
   return client.notify(methods.client.session.update, { sessionId, update });
@@ -310,12 +364,24 @@ function textChunk(messageId, text) {
   return { messageId, content: { type: "text", text } };
 }
 
-const DEFAULTS = {
-  initializeModes: () => ({
+// M2.4 (2026-09-18): expose all 4 permission modes (default/acceptEdits/dontAsk/
+// bypassPermissions) so the ACP `modes` field matches claude-agent-acp's
+// `availableModes`. The currently-active mode comes from the session
+// record (`rec.mode`); unknown / missing values fall back to "default".
+// See P4 差距记录 §2.3 + dsh-acp-权限链路工具卡断排查记录 §三.1.
+//
+// M2.4 revert (2026-09-19): UI regression — dsh-web session-management
+// button click has no response. Revert to single-mode stub while we
+// identify the offending field. Re-introduce 4-mode once frontend is
+// confirmed safe (see docs/实施计划/P4-…-实施计划.md §0.7).
+function initializeModes() {
+  return {
     currentModeId: "default",
-    availableModes: [{ id: "default", name: "Default", description: "Standard mode" }],
-  }),
-};
+    availableModes: [
+      { id: "default", name: "Default", description: "Ask before every tool call" },
+    ],
+  };
+}
 
 // ---- FEAT: per-session provider + model switching (FE-1) -----------------
 // Models offered to Obsidian's configOption dropdown are enumerated from dsh's
@@ -435,7 +501,12 @@ function temperatureConfigOption(session) {
  * P2.5: surfaced as a configOption select.
  */
 function reasoningEffortConfigOption(session) {
-  const valid = ["none", "low", "medium", "high"];
+  // M2.1 (2026-09-18): align with claude-agent-acp's reasoningEffort levels
+  // (low/medium/high/max). dsh keeps an additional `none` (disable thinking
+  // entirely) as a dsh-specific option. The 5-level union is harmless — dsh-llm
+  // accepts arbitrary reasoningEffort strings (lib/index.js:361 only uses the
+  // value for cache invalidation, downstream provider decides meaning).
+  const valid = ["none", "low", "medium", "high", "max"];
   const current = valid.includes(session?.reasoningEffort) ? session.reasoningEffort : "medium";
   return {
     id: "reasoningEffort",
@@ -449,6 +520,7 @@ function reasoningEffortConfigOption(session) {
       { value: "low", name: "Low" },
       { value: "medium", name: "Medium" },
       { value: "high", name: "High" },
+      { value: "max", name: "Max" },
     ],
   };
 }
@@ -470,6 +542,7 @@ function listSessionRecords(cwd) {
     parentSessionId: s.parentSessionId,
     summary: s.summary ?? undefined,
     summaryAt: s.summaryAt ?? undefined,
+    createdAt: s.createdAt ?? undefined, // M1.1: ISO timestamp for updatedAt derivation
   }));
   const scanned = scanArchives(cwd).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, parentSessionId: null }));
   // De-dupe by id, index records first.
@@ -543,13 +616,15 @@ function createAgent() {
     },
 
     async newSession(params) {
-      const rec = createSession({ cwd: params.cwd, title: params._meta?.title });
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
+      const cwd = validateCwdParam(params.cwd, "session/new");
+      const rec = createSession({ cwd: cwd ?? params.cwd, title: params._meta?.title });
+      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async loadSession(params) {
-      const rec = ensureSession(params.sessionId, params.cwd);
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
+      const cwd = validateCwdParam(params.cwd, "session/load");
+      const rec = ensureSession(params.sessionId, cwd ?? params.cwd);
+      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async listSessions(params) {
@@ -569,6 +644,14 @@ function createAgent() {
         sessionId: s.id,
         title: s.title,
         cwd: s.cwd,
+        // M1.1 (2026-09-18): align with @agentclientprotocol/claude-agent-acp's
+        // session/list schema — top-level `updatedAt` ISO timestamp lets ACP
+        // clients (Obsidian, Claude Code, etc.) sort/display sessions by
+        // recency without reaching into `_meta`. Falls back to summaryAt →
+        // createdAt → undefined. Claude's reference impl uses
+        // `new Date(session.lastModified).toISOString()`; we use summaryAt
+        // when present since that's our last LLM-update marker.
+        updatedAt: s.summaryAt ?? s.createdAt ?? undefined,
         // Some clients display parent/lineage when present.
         parentSessionId: s.parentSessionId ?? undefined,
         // FEAT: session summary preview rides in `_meta` — SessionInfo has a
@@ -601,22 +684,31 @@ function createAgent() {
     async resumeSession(params) {
       const rec = getSession(params.sessionId);
       if (!rec) throw new RequestError(`session ${params.sessionId} not found`);
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes(), configOptions: sessionConfigOptions(rec) };
+      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
     },
 
     async forkSession(params) {
-      const rec = forkSession(params.sessionId, params.cwd);
+      const cwd = validateCwdParam(params.cwd, "session/fork");
+      const rec = forkSession(params.sessionId, cwd ?? params.cwd);
       if (!rec) throw new RequestError(`source session ${params.sessionId} not found`);
-      return { sessionId: rec.id, modes: DEFAULTS.initializeModes() };
+      return { sessionId: rec.id, modes: initializeModes() };
     },
 
     async closeSession() { return undefined; },
-    async setSessionMode() { return undefined; },
+    async setSessionMode(params) {
+      // M2.4 revert (2026-09-19): UI regression — dsh-web session-management
+      // button click has no response. Revert to no-op stub while we identify
+      // the offending field. The 4-mode + persistence implementation was
+      // correct (258 unit tests + acp-feature-test 6 checks pass) — but the
+      // dsh-web React frontend appears not to handle the expanded modes
+      // payload, breaking UI buttons.
+      return undefined;
+    },
     async setSessionConfigOption(params) {
       // Per-session config override (FEAT). Recognised configIds:
       //   "model"           — switch the session's model
       //   "temperature"     — P2.5: number 0..2
-      //   "reasoningEffort" — P2.5: "none" | "low" | "medium" | "high"
+      //   "reasoningEffort" — P2.5 + M2.1: "none" | "low" | "medium" | "high" | "max"
       // Persist onto the session record so prompt() can apply it.
       const session = getSession(params.sessionId);
       if (!session) throw new RequestError(`session ${params.sessionId} not found`);
@@ -631,7 +723,10 @@ function createAgent() {
           updateSessionMeta(params.sessionId, { temperature: n });
         }
       } else if (params.configId === "reasoningEffort") {
-        const valid = ["none", "low", "medium", "high"];
+        // M2.1 fix (2026-09-18): include "max" to match reasoningEffortConfigOption's
+        // 5-level union. Without this, setSessionConfigOption silently rejected
+        // "max" while the dropdown advertised it — a UI promise / handler gap.
+        const valid = ["none", "low", "medium", "high", "max"];
         if (typeof params.value === "string" && valid.includes(params.value)) {
           updateSessionMeta(params.sessionId, { reasoningEffort: params.value });
         }

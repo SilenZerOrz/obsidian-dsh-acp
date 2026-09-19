@@ -220,8 +220,14 @@ export class DshAcpService extends Service {
 				DSH_ACP_RUNTIME_MODE: this.config.runtime?.mode === "long" ? "spawn" : "spawn",
 				DSH_ACP_SPAWN_FALLBACK: this.config.runtime?.spawnFallback === false ? "false" : "true",
 				DSH_ACP_PERMISSION_MODE: this.config.permission?.mode ?? "default",
-				DSH_ACP_PERMISSION_TIMEOUT_MS: String(this.config.permission?.timeoutMs ?? 300000),
+				// Phase B: timeoutMs is deprecated — only forward when the
+				// operator has explicitly set one (mostly for backward
+				// diagnostic visibility). The new PermissionGate ignores it.
+				...(this.config.permission?.timeoutMs !== undefined
+					? { DSH_ACP_PERMISSION_TIMEOUT_MS: String(this.config.permission.timeoutMs) }
+					: {}),
 				DSH_ACP_PERMISSION_EDIT_TOOLS: (this.config.permission?.editTools ?? ["Edit", "Write", "MultiEdit", "NotebookEdit"]).join(","),
+				DSH_ACP_PERMISSION_ENABLE_ROOT_BYPASS: this.config.permission?.enableRootBypass === true ? "true" : "false",
 				...this.config.env,
 			},
 			signal: this.abortController.signal,
@@ -329,8 +335,10 @@ export const inject = [];
  *   - `runtime.mode` — "long" (in-process) or "spawn" (child dsh-acp.mjs). Default "spawn"
  *     to keep the current behavior; long mode is opt-in via Config or env.
  *   - `runtime.spawnFallback` — if true (default), long init failure falls back to spawn.
- *   - `permission.{mode,timeoutMs,editTools}` — 4-mode permission gate; consumed by
- *     both the cordis plugin (long) and the spawned adapter (env-mirrored).
+ *   - `permission.{mode,editTools,enableRootBypass}` — 4-mode permission gate; consumed by
+ *     both the cordis plugin (long) and the spawned adapter (env-mirrored). The legacy
+ *     `permission.timeoutMs` is now optional and ignored — see Phase B note in
+ *     `~/projects/app/notes/踩坑经验/obsidian-dsh-acp/obsidian-dsh-acp-权限链路工具卡断排查记录.md`.
  */
 export const Config = z.object({
 	spawn: z.boolean().default(true),
@@ -359,8 +367,17 @@ export const Config = z.object({
 			z.const("dontAsk"),
 			z.const("bypassPermissions"),
 		]).default("default"),
-		timeoutMs: z.number().default(300000),
+		// Phase B: timeoutMs is deprecated — kept as optional for backward
+		// compat with existing config files but no longer consumed by
+		// PermissionGate. The gate now races against an AbortSignal.
+		// NOTE: schemastery marks optional via `.required(false)` (not zod's
+		// `.optional()`). See memory `dsh-schemastery-not-zod`.
+		timeoutMs: z.number().required(false),
 		editTools: z.array(z.string()).default(["Edit", "Write", "MultiEdit", "NotebookEdit"]),
+		// Phase B: when true, bypassPermissions is honored even when
+		// process.geteuid() === 0 (mirrors official IS_SANDBOX=1). Defaults
+		// to false to match the official "non-root only" default.
+		enableRootBypass: z.boolean().default(false),
 	}).default({}),
 });
 

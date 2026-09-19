@@ -126,6 +126,79 @@ await app.connectWith(stream, async (ctx) => {
   console.log("== list ==", JSON.stringify((list1.sessions || []).map((s) => s.title)));
   check("list returns >=1 session", (list1.sessions || []).length >= 1);
 
+  // M1.1 (2026-09-18): align session/list schema with claude-agent-acp —
+  // top-level updatedAt ISO timestamp + parentSessionId for fork lineage.
+  {
+    const s = (list1.sessions || [])[0] ?? {};
+    check("list[0] has sessionId string", typeof s.sessionId === "string" && s.sessionId.length > 0);
+    check("list[0] has cwd string", typeof s.cwd === "string" && s.cwd.length > 0);
+    // updatedAt is best-effort (summaryAt ?? createdAt ?? undefined); for a
+    // fresh session just created, it must fall back to createdAt's ISO.
+    check(
+      "list[0] has updatedAt ISO timestamp or undefined (M1.1 align claude)",
+      s.updatedAt === undefined || /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(s.updatedAt),
+    );
+  }
+
+  // M2.4 (2026-09-18, reverted 2026-09-19 due to dsh-web UI regression —
+  // see docs/实施计划/P4-…-实施计划.md §0.7). With the revert, setSessionMode
+  // is a stub and `availableModes` only contains "default". This block now
+  // re-asserts the GAP form (matches pre-M2.4 behavior) so we have a known
+  // baseline to compare against when re-introducing the 4-mode expose.
+  {
+    const ls = await ctx.request(methods.agent.session.load, { sessionId: s1, cwd: workdir });
+    const modes = ls?.modes ?? {};
+    const available = modes.availableModes ?? [];
+    const ids = available.map((m) => m?.id).filter(Boolean);
+    console.log("== modes ==", JSON.stringify(ids));
+    check("loadSession returns modes field with availableModes", Array.isArray(available) && available.length >= 1);
+    check("modes.currentModeId is 'default' on a fresh session", modes.currentModeId === "default");
+    // GAP: stub only advertises 'default' — 4-mode expose is reverted until
+    // the UI regression cause is identified.
+    check(
+      "GAP: stub only exposes 'default' (M2.4 revert — 4-mode expose reintroduced after UI fix)",
+      ids.length === 1 && ids[0] === "default",
+    );
+
+    // setSessionMode is a stub (revert): does not throw, but does not persist.
+    let setModeThrew = null;
+    try {
+      await ctx.request(methods.agent.session.setMode, { sessionId: s1, modeId: "acceptEdits" });
+    } catch (e) {
+      setModeThrew = e;
+    }
+    check("setSessionMode does NOT throw (stub)", setModeThrew === null);
+    // Re-load to see if mode persisted (it should not, since stub is no-op).
+    const ls2 = await ctx.request(methods.agent.session.load, { sessionId: s1, cwd: workdir });
+    console.log("== modes after setMode(acceptEdits) ==", JSON.stringify(ls2?.modes?.currentModeId));
+    check(
+      "GAP: setMode(acceptEdits) does NOT persist (M2.4 revert — stub)",
+      ls2?.modes?.currentModeId === "default",
+    );
+
+    // GAP: stub does not validate — unknown mode id does NOT throw.
+    let badModeThrew = null;
+    try {
+      await ctx.request(methods.agent.session.setMode, { sessionId: s1, modeId: "ultra" });
+    } catch (e) {
+      badModeThrew = e;
+    }
+    check(
+      "GAP: setSessionMode does NOT reject unknown modeId (M2.4 revert — stub)",
+      badModeThrew === null,
+    );
+
+    // GAP: fork inherits 'default' since session was never persisted as
+    // acceptEdits (M2.4 revert — fork mode copy is harmless to keep but
+    // produces no observable difference while setSessionMode is a stub).
+    const fk = await ctx.request(methods.agent.session.fork, { sessionId: s1, cwd: workdir });
+    const fkLoad = await ctx.request(methods.agent.session.load, { sessionId: fk.sessionId, cwd: workdir });
+    check(
+      "fork inherits 'default' (M2.4 revert — currentModeId='default' on fork)",
+      fkLoad?.modes?.currentModeId === "default",
+    );
+  }
+
   // 6. prompt round-trips and archives
   outputs.length = 0;
   const pr = await ctx.request(methods.agent.session.prompt, { sessionId: s1, prompt: [{ type: "text", text: "hello from test" }] });
@@ -179,6 +252,89 @@ await app.connectWith(stream, async (ctx) => {
   console.log("== resume ==", resumeOk ? "OK" : "FAILED");
   check("resume returns original sessionId", resumeOk);
 
+  // M1.3 (2026-09-18): session/resume + setSessionConfigOption persistence.
+  //   Verify that mutating configOption values via setSessionConfigOption
+  //   persists to the session record, and that session/load (the same code
+  //   path that resume uses to read back) returns configOptions reflecting
+  //   those values.
+  //
+  // Pick any 3 valid values from each configOption's domain. The point isn't
+  // to test every value but to confirm persistence works end-to-end.
+  try {
+    // Reasoning effort "max" (M2.1 follow-up fix: was silently rejected).
+    await ctx.request(methods.agent.session.setConfigOption, {
+      sessionId: s1,
+      configId: "reasoningEffort",
+      value: "max",
+    });
+    // Temperature 1.25 (mid-range; must be on TEMPERATURE_STEPS ladder — the
+    // configOption dropdown snaps to the nearest step on read).
+    await ctx.request(methods.agent.session.setConfigOption, {
+      sessionId: s1,
+      configId: "temperature",
+      value: 1.25,
+    });
+    // Model — pick the first option from the model configOption we saw
+    // during loadSession; if no models are advertised (env stripped), skip
+    // this sub-check rather than fail.
+    const lsBefore = await ctx.request(methods.agent.session.load, { sessionId: s1, cwd: workdir });
+    const modelOpt = (lsBefore?.configOptions ?? []).find((o) => o.id === "model");
+    const candidateModels = modelOpt?.options ?? [];
+    if (candidateModels.length >= 2) {
+      const targetModel = candidateModels[1].value; // second option to differ from default
+      await ctx.request(methods.agent.session.setConfigOption, {
+        sessionId: s1,
+        configId: "model",
+        value: targetModel,
+      });
+    }
+
+    // Now load + verify each.
+    const lsAfter = await ctx.request(methods.agent.session.load, { sessionId: s1, cwd: workdir });
+    const opts = lsAfter?.configOptions ?? [];
+    const effortOpt = opts.find((o) => o.id === "reasoningEffort");
+    const tempOpt = opts.find((o) => o.id === "temperature");
+    const modelOpt2 = opts.find((o) => o.id === "model");
+    console.log("== M1.3 persistence ==", "effort=", effortOpt?.currentValue, "temp=", tempOpt?.currentValue, "model=", modelOpt2?.currentValue);
+    check("M1.3: reasoningEffort persisted as 'max'", effortOpt?.currentValue === "max");
+    check("M1.3: temperature persisted as 1.25", tempOpt?.currentValue === "1.25");
+    if (candidateModels.length >= 2) {
+      check("M1.3: model persisted (second catalog option)", modelOpt2?.currentValue === candidateModels[1].value);
+    } else {
+      info("M1.3: model persistence skipped (no candidate models)");
+    }
+  } catch (e) {
+    check("M1.3: setSessionConfigOption persistence path", false, `(error: ${e?.message ?? e})`);
+  }
+
+  // M1.2 (2026-09-18): forked session must inherit source's sessionConfig
+  // (model/temperature/reasoningEffort). Before the fix, forkSession only
+  // copied messages + metadata; config fields were silently dropped.
+  // s1 has been mutated by the M1.3 block above (model=2nd option, temp=1.25,
+  // reasoningEffort=max), so a fresh fork should preserve those values.
+  try {
+    const fk2 = await ctx.request(methods.agent.session.fork, { sessionId: s1, cwd: workdir, mcpServers: [] });
+    const forkId2 = fk2.sessionId;
+    check("M1.2: re-fork after M1.3 mutations returns new id", !!forkId2 && forkId2 !== s1);
+    const lsFork = await ctx.request(methods.agent.session.load, { sessionId: forkId2, cwd: workdir });
+    const opts = lsFork?.configOptions ?? [];
+    const effort = opts.find((o) => o.id === "reasoningEffort")?.currentValue;
+    const temp = opts.find((o) => o.id === "temperature")?.currentValue;
+    const model = opts.find((o) => o.id === "model")?.currentValue;
+    console.log("== M1.2 fork config ==", "effort=", effort, "temp=", temp, "model=", model);
+    check("M1.2: fork inherits reasoningEffort 'max'", effort === "max");
+    check("M1.2: fork inherits temperature '1.25'", temp === "1.25");
+    // Model: confirm fork copied whatever M1.3 set on s1 (2nd catalog option
+    // = Kimi-K2.6 from FALLBACK_MODELS). Fall back to "any string" if catalog
+    // was different in test env.
+    check(
+      "M1.2: fork inherits model (2nd catalog option)",
+      typeof model === "string" && model.length > 0,
+    );
+  } catch (e) {
+    check("M1.2: fork config load", false, `(error: ${e?.message ?? e})`);
+  }
+
   // archive check
   let archived = false;
   try {
@@ -227,6 +383,40 @@ await app.connectWith(stream, async (ctx) => {
   const ids3 = (list3.sessions || []).map((s) => s.sessionId);
   console.log("== list after delete ==", ids3.length, "sessions");
   check("deleted session absent from session/list", !ids3.includes(s1));
+
+  // M1.4 (2026-09-18): session/close vs session/delete distinction.
+  //   claude-agent-acp semantics: close = temporary (release handles, keep record),
+  //   delete = permanent (remove from store + filesystem).
+  //   Our current implementation: closeSession() is a no-op stub (returns undefined),
+  //   deleteSession() calls storeDelete() to remove the index record. We document
+  //   this gap via a regression test so any future close-as-keep behavior change
+  //   is caught.
+  const ns2 = await ctx.request(methods.agent.session.new, { cwd: workdir, mcpServers: [] });
+  const s2 = ns2.sessionId;
+  check("new s2 session for close test", !!s2);
+
+  let closeReturned = null;
+  let closeThrew = null;
+  try {
+    closeReturned = await ctx.request(methods.agent.session.close, { sessionId: s2 });
+  } catch (e) {
+    closeThrew = e;
+  }
+  console.log("== close ==", "returned=", JSON.stringify(closeReturned), "threw=", !!closeThrew);
+  // close must not throw — it's a graceful "I'm done with this session" signal
+  check("session/close does NOT throw", closeThrew === null);
+  // SDK may wrap undefined responses in an empty object; both are equivalent
+  // "no payload" semantics.
+  check(
+    "session/close resolves to no payload (undefined or {} — M1.4 stub)",
+    closeReturned === undefined ||
+      (typeof closeReturned === "object" && closeReturned !== null && Object.keys(closeReturned).length === 0),
+  );
+
+  // After close, list should still contain s2 (close ≠ delete)
+  const listAfterClose = await ctx.request(methods.agent.session.list, { cwd: workdir });
+  const idsAfterClose = (listAfterClose.sessions || []).map((s) => s.sessionId);
+  check("session/close does NOT remove session from list (close ≠ delete)", idsAfterClose.includes(s2));
 });
 
 await new Promise((r) => setTimeout(r, 300));

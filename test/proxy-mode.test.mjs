@@ -498,3 +498,206 @@ test("forwardPromptViaHttp: SSE 'request' missing correlationId logs and skips P
     restore();
   }
 });
+
+// =====================================================================
+// Phase E (2026-09-18): abort-signal tests for handleServerRequest
+// =====================================================================
+//
+// Without these, a silent Obsidian Agent Client would strand the server's
+// pending Promise: the outer 10-minute PROMPT_TIMEOUT_MS would abort the
+// fetch but never tell the server "the user cancelled". Phase D threads
+// AbortSignal through handleServerRequest; the tests below lock the
+// contract:
+//   - abort mid-flight → POST {ok:false, error:"aborted: …"} within ms
+//   - abort BEFORE onRequest fires → POST {ok:false, error:"aborted"} and
+//     onRequest is NEVER invoked
+//   - onRequest throwing vs aborting are distinguishable in the POST body
+
+test("forwardPromptViaHttp: handleServerRequest abort mid-flight → POST ok=false with 'aborted:' prefix", async () => {
+  const observedPermissionBodies = [];
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      const sse =
+        "event: request\n" +
+        "data: {\"correlationId\":\"req-abort-1\",\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200 });
+    }
+    throw new Error("unexpected fetch: " + url);
+  });
+  const ctl = new AbortController();
+  let onRequestInvoked = false;
+  // Fire the abort AFTER the SSE 'request' event has reached
+  // handleServerRequest and onRequest is mid-flight. Two ticks covers it.
+  setTimeout(() => ctl.abort(), 20);
+  try {
+    await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: () => {},
+      onRequest: async () => {
+        onRequestInvoked = true;
+        // Never resolves — relies on abort to free us.
+        return new Promise(() => {});
+      },
+      signal: ctl.signal,
+    });
+    // After the abort sequence, the reply must have been POSTed.
+    assert.equal(observedPermissionBodies.length, 1, "one permission-response POST");
+    assert.equal(observedPermissionBodies[0].ok, false);
+    assert.equal(observedPermissionBodies[0].correlationId, "req-abort-1");
+    assert.match(observedPermissionBodies[0].error, /^aborted:/);
+    assert.equal(onRequestInvoked, true, "onRequest was invoked once before the abort");
+  } finally {
+    if (!ctl.signal.aborted) ctl.abort();
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: pre-aborted signal before 'request' event → POST ok=false without invoking onRequest", async () => {
+  const observedPermissionBodies = [];
+  let promptFetchCalled = false;
+  // Block the prompt fetch on a controller so we can abort between connect
+  // and the SSE 'request' event reaching the client.
+  let abortPromptStream;
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      promptFetchCalled = true;
+      // Stream that yields the 'request' event only after the test signals.
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          abortPromptStream = () => {
+            controller.enqueue(
+              encoder.encode(
+                "event: request\n" +
+                  "data: {\"correlationId\":\"req-pre\",\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+                  "event: result\n" +
+                  "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n",
+              ),
+            );
+            controller.close();
+          };
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200 });
+    }
+    throw new Error("unexpected fetch: " + url);
+  });
+
+  const ctl = new AbortController();
+  const onRequest = async () => {
+    throw new Error("onRequest MUST NOT be invoked when signal is pre-aborted");
+  };
+  const forwardPromise = forwardPromptViaHttp({
+    baseUrl: "http://example.test",
+    sessionId: "sess-1",
+    prompt: "x",
+    onUpdate: () => {},
+    onRequest,
+    signal: ctl.signal,
+  });
+
+  // Abort before the SSE 'request' event is delivered.
+  ctl.abort();
+  // Now deliver the SSE — the handleServerRequest path will see the
+  // aborted signal and short-circuit.
+  abortPromptStream?.();
+
+  try {
+    await forwardPromise;
+    assert.equal(observedPermissionBodies.length, 1, "POST fired with abort error");
+    assert.equal(observedPermissionBodies[0].ok, false);
+    assert.equal(observedPermissionBodies[0].correlationId, "req-pre");
+    assert.match(observedPermissionBodies[0].error, /aborted/);
+  } finally {
+    if (!promptFetchCalled) ctl.abort();
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: abort BEFORE forwardPromptViaHttp starts → fetch's signal is already aborted", async () => {
+  // fetch() in node honors the signal: with an aborted signal it rejects
+  // with an AbortError WITHOUT actually dispatching the request. The mock
+  // here simulates that by rejecting with the same shape. The pre-aborted
+  // signal still reaches fetch (the proxy's internal ctl propagates), but
+  // the network request is never made — that's what matters here.
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (init?.signal?.aborted) {
+      const e = new Error("This operation was aborted");
+      e.name = "AbortError";
+      throw e;
+    }
+    throw new Error("fetch should NOT have fired: signal was pre-aborted but mock saw an un-aborted signal");
+  });
+  const ctl = new AbortController();
+  ctl.abort();
+  try {
+    await assert.rejects(
+      forwardPromptViaHttp({
+        baseUrl: "http://example.test",
+        sessionId: "sess-1",
+        prompt: "x",
+        onUpdate: () => {},
+        signal: ctl.signal,
+      }),
+      (err) => err && err.name === "AbortError",
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("forwardPromptViaHttp: abort during onRequest → POST error includes 'aborted:' marker", async () => {
+  // Distinguish abort vs onRequest-throw. The proxy-mode.mjs handler
+  // prefixes aborts with "aborted:" so the server's SseWriter can reject
+  // its pending Promise with the same name. A throw from onRequest must
+  // NOT carry that prefix.
+  const observedPermissionBodies = [];
+  const restore = withMockFetch(async (url, init = {}) => {
+    if (url.endsWith("/acp/proxy/session/prompt")) {
+      const sse =
+        "event: request\n" +
+        "data: {\"correlationId\":\"req-distinguish\",\"method\":\"session/request_permission\",\"params\":{}}\n\n" +
+        "event: result\n" +
+        "data: {\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":0}}\n\n";
+      return sseResponse([sse]);
+    }
+    if (url.endsWith("/acp/proxy/permission-response")) {
+      observedPermissionBodies.push(JSON.parse(init.body));
+      return new Response("{}", { status: 200 });
+    }
+    throw new Error("unexpected fetch");
+  });
+
+  const ctl = new AbortController();
+  setTimeout(() => ctl.abort(), 20);
+
+  try {
+    await forwardPromptViaHttp({
+      baseUrl: "http://example.test",
+      sessionId: "sess-1",
+      prompt: "x",
+      onUpdate: () => {},
+      onRequest: () => new Promise(() => {}), // never settles
+      signal: ctl.signal,
+    });
+    const body = observedPermissionBodies[0];
+    assert.equal(body.ok, false);
+    assert.match(body.error, /^aborted:/, "abort errors must be distinguishable from onRequest throws");
+    assert.doesNotMatch(body.error, /^aborted:aborted/, "no double-prefix");
+  } finally {
+    ctl.abort();
+    restore();
+  }
+});

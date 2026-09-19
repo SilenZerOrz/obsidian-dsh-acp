@@ -27,3 +27,10 @@ pnpm-lock.yaml
 # Local-only dev docs (requirements / planning). Kept off git until we decide
 # to commit them ("后续补上传 git"). Tracked only on the developer's machine.
 docs/
+
+# npm pack test artifacts (do NOT commit)
+package/
+obsidian-dsh-acp-*.tgz
+
+# awesome-dsh-plugin submission draft (do NOT commit — local-only)
+awesome-dsh-plugin/

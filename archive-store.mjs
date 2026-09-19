@@ -64,6 +64,13 @@ export function archiveLogPath(cwd, sessionId) {
 
 // ---- Durable ACP session index ------------------------------------------
 
+// M2.4 (2026-09-18): the per-session permission mode. Mirrors
+// `PermissionMode` in lib/permission-gate.mjs. Exposed as a Set so the
+// `updateSessionMeta` whitelist can guard against typos / unknown modes
+// silently coercing a session into an unhandled mode.
+export const PERMISSION_MODES = ["default", "acceptEdits", "dontAsk", "bypassPermissions"];
+export const PERMISSION_MODES_SET = new Set(PERMISSION_MODES);
+
 let cache = null;
 // Ids recently deleted by THIS process. Kept in memory only, so the
 // write-before-read merge (REQ-04) does not resurrect a session that a
@@ -247,6 +254,24 @@ export function updateSessionMeta(sessionId, patch = {}) {
   if (typeof patch.summary === "string") rec.summary = patch.summary;
   if (typeof patch.summaryAt === "number") rec.summaryAt = patch.summaryAt;
   if (typeof patch.model === "string") rec.model = patch.model;
+  // M1.3 fix (2026-09-18): setSessionConfigOption for temperature and
+  // reasoningEffort was silently no-op because updateSessionMeta's whitelist
+  // dropped both keys. Without these lines, Obsidian UI changes to those
+  // fields never persisted to the session record and resume/load would
+  // return stale values.
+  if (typeof patch.temperature === "number" && Number.isFinite(patch.temperature)) {
+    rec.temperature = patch.temperature;
+  }
+  if (typeof patch.reasoningEffort === "string") {
+    rec.reasoningEffort = patch.reasoningEffort;
+  }
+  // M2.4 (2026-09-18): persist the per-session permission mode so
+  // setSessionMode(acceptEdits/dontAsk/bypassPermissions) survives resume.
+  // Without this whitelist entry the change was silently dropped and the
+  // next session/load would return currentModeId="default" again.
+  if (typeof patch.mode === "string" && PERMISSION_MODES_SET.has(patch.mode)) {
+    rec.mode = patch.mode;
+  }
   if (typeof patch.archived === "boolean") rec.archived = patch.archived;
   // 软删除旗标（回收站机制）：trashed=true 不删磁盘文件，仅从 active 列表隐藏；
   // 恢复时 trashed=false 即可，archive dir 完整保留 → 无损还原。
@@ -303,6 +328,23 @@ export function forkSession(sourceSessionId, cwd) {
     archive: `session-${randomUUID()}`,
     // Fresh archive dir, so its event seq starts from 0 (not inherited).
     archiveSeq: 0,
+    // M1.2 fix (2026-09-18): copy sessionConfig fields + metadata so the
+    // forked session preserves model/temperature/reasoningEffort/summary/
+    // category/obsidianFile. Without these, forking a tuned session silently
+    // reverted it to defaults — same root cause as the M1.3 updateSessionMeta
+    // whitelist gap (silent drop of important fields).
+    model: src.model,
+    temperature: src.temperature,
+    reasoningEffort: src.reasoningEffort,
+    // M2.4 (2026-09-18): also copy the permission mode so a forked session
+    // inherits the parent's acceptEdits/dontAsk/bypassPermissions choice
+    // instead of silently falling back to "default".
+    mode: src.mode,
+    summary: src.summary,
+    summaryAt: src.summaryAt,
+    category: src.category,
+    obsidianSessionId: src.obsidianSessionId,
+    obsidianFile: src.obsidianFile,
   };
   idx.sessions[id] = rec;
   persistIndex(true);

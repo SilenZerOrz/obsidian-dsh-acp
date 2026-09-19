@@ -77,7 +77,7 @@ test("buildStreamOptions: omits reasoningEffort when not set", () => {
 // We mirror the rules here so the contract is documented + testable.
 
 const VALID_TEMPERATURE_RANGE = [0, 2];
-const VALID_REASONING_EFFORTS = ["none", "low", "medium", "high"];
+const VALID_REASONING_EFFORTS = ["none", "low", "medium", "high", "max"];
 // Mirrors TEMPERATURE_STEPS in dsh-acp.mjs. Temperature is surfaced as a
 // discrete select ladder (ACP's zSessionConfigOption has no `number` form),
 // with the persisted value snapped to the nearest step.
@@ -146,11 +146,18 @@ test("reasoningEffort: accepts all 4 valid values", () => {
 });
 
 test("reasoningEffort: rejects unknown values", () => {
-  assert.equal(validateReasoningEffort("max"), false);
+  assert.equal(validateReasoningEffort("ultra"), false);
   assert.equal(validateReasoningEffort(""), false);
   assert.equal(validateReasoningEffort(123), false);
   assert.equal(validateReasoningEffort(null), false);
   assert.equal(validateReasoningEffort(undefined), false);
+});
+
+test("reasoningEffort: accepts 'max' (M2.1 — align claude-agent-acp's 4→5 levels)", () => {
+  // claude-agent-acp exposes low/medium/high/max. dsh-acp adds `none` for
+  // disabling thinking entirely. M2.1 (2026-09-18) added "max" to the option
+  // dropdown + the validator; this test protects against regression.
+  assert.equal(validateReasoningEffort("max"), true);
 });
 
 // --- session config option shapes (P2.5 surfaces) --------------------------
@@ -175,7 +182,7 @@ function temperatureOptionShape(current) {
 }
 
 function reasoningEffortOptionShape(current) {
-  const valid = ["none", "low", "medium", "high"];
+  const valid = ["none", "low", "medium", "high", "max"];
   const safe = valid.includes(current) ? current : "medium";
   return {
     id: "reasoningEffort",
@@ -184,7 +191,7 @@ function reasoningEffortOptionShape(current) {
     category: "model",
     type: "select",
     currentValue: safe,
-    options: valid.map((v) => ({ value: v, name: v.charAt(0).toUpperCase() + v.slice(1) })),
+    options: valid.map((v) => ({ value: v, name: v === "max" ? "Max" : v.charAt(0).toUpperCase() + v.slice(1) })),
   };
 }
 
@@ -215,14 +222,14 @@ test("temperature option: defaults to 0.7 when current is not a number", () => {
   assert.equal(temperatureOptionShape("hot").currentValue, "0.7");
 });
 
-test("reasoningEffort option: shape exposes all 4 values", () => {
+test("reasoningEffort option: shape exposes all 5 values (M2.1)", () => {
   const opt = reasoningEffortOptionShape("high");
   assert.equal(opt.type, "select");
   assert.equal(opt.currentValue, "high");
-  assert.equal(opt.options.length, 4);
+  assert.equal(opt.options.length, 5);
   assert.deepEqual(
     opt.options.map((o) => o.value),
-    ["none", "low", "medium", "high"],
+    ["none", "low", "medium", "high", "max"],
   );
 });
 

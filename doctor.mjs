@@ -11,11 +11,15 @@
 
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-// 本插件版本（与 package.json 保持同步）
-export const ADAPTER_VERSION = "0.1.4";
+// 本插件版本（与 package.json 保持同步）：从同目录 package.json 读，避免依赖 cwd
+const _PKG = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+);
+export const ADAPTER_VERSION = _PKG.version;
 
 /** 定位 dsh 二进制（与 dsh-acp.mjs 的 detectDshBinary 一致）。 */
 export function detectDshBinary() {

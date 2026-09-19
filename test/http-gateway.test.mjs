@@ -311,6 +311,61 @@ test("registerHttpGateway registers probe + prompt routes on webServer", () => {
   assert.ok(ws.handlers.has("/acp/proxy/session/prompt"));
 });
 
+test("registerHttpGateway: warm-up is fire-and-forget — does NOT block registration (M0.2)", () => {
+  // Warm-up calls ensureLongRuntime which tries ctx.llm.stream. Without that,
+  // warm-up will fail asynchronously — registerHttpGateway must still return
+  // promptly and not propagate the failure.
+  const ws = makeMockWebServer();
+  const ctx = { logger: { info() {} } }; // no llm.stream → warm-up fails
+  const t0 = Date.now();
+  registerHttpGateway(ctx, ws);
+  const elapsed = Date.now() - t0;
+  assert.ok(
+    elapsed < 100,
+    `registerHttpGateway took ${elapsed}ms; warm-up must be fire-and-forget, not block registration`,
+  );
+});
+
+test("registerHttpGateway: warm-up failure does not throw — handler routes still registered (M0.2)", async () => {
+  // Even when warm-up fails (no llm.stream), the routes must remain registered
+  // and the probe handler must still answer (reporting longReady=false).
+  const ws = makeMockWebServer();
+  const ctx = { logger: { info() {} } };
+  // Silence stderr noise from warm-up failure logging in test output.
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = () => true;
+  try {
+    registerHttpGateway(ctx, ws);
+    // Let the warm-up rejection settle so stderr noise is suppressed.
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  assert.ok(ws.handlers.has("/acp/proxy/probe"));
+  // Probe handler still callable (it does its own try/catch around getLongRuntime)
+  const { req, res, writes } = makeMockReqRes({ method: "GET" });
+  await ws.handlers.get("/acp/proxy/probe")(req, res);
+  const probeBody = JSON.parse(writes[0]);
+  assert.equal(probeBody.ok, true);
+  assert.equal(typeof probeBody.longReady, "boolean");
+});
+
+test("registerHttpGateway: enablePrompt=false skips warm-up (M0.2)", async () => {
+  // With enablePrompt=false, /prompt and /permission-response aren't registered
+  // so warm-up should also be skipped (no point warm-ing long-runtime when no
+  // consumer can hit it).
+  const ws = makeMockWebServer();
+  const ctx = { logger: { info() {} } };
+  registerHttpGateway(ctx, ws, { enablePrompt: false });
+  assert.ok(!ws.handlers.has("/acp/proxy/session/prompt"));
+  // No way to verify warm-up was skipped from outside (it would just silently
+  // never fire), but probe should still work.
+  const { req, res, writes } = makeMockReqRes({ method: "GET" });
+  await ws.handlers.get("/acp/proxy/probe")(req, res);
+  const probeBody = JSON.parse(writes[0]);
+  assert.equal(probeBody.longReady, false);
+});
+
 test("registerHttpGateway: enablePrompt=false omits prompt route", () => {
   const ws = makeMockWebServer();
   const ctx = { logger: { info() {} } };
