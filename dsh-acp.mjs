@@ -39,6 +39,7 @@ import {
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
+import { detectDshBinary, resolveDshSpawnSpec } from "./doctor.mjs";
 import {
   probeDshWebGateway,
   forwardPromptViaHttp,
@@ -118,41 +119,17 @@ const permissiveAny = passThrough;
 // `dsh --profile headless` runs the backend. GUI ACP clients (Obsidian) inherit
 // a minimal environment that usually does NOT include shell PATH additions, so
 // the plugin and the Obsidian custom-agent `env` should set DSH_BIN explicitly.
-// Order: env DSH_BIN -> DSH_ACP_DSH (config file shim) -> "dsh" on PATH.
-//
-// To be robust against a GUI host that lacks shell PATH additions (Obsidian,
-// native apps), we ALSO probe a few well-known install locations when DSH_BIN
-// is unset, instead of relying on the bare "dsh" name resolving on PATH.
-// This fixes "spawn dsh ENOENT" when the adapter runs under a minimal env.
-import { accessSync, constants as fsConstants, mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, join as joinPath } from "node:path";
-
-function detectDshBinary() {
-  // Priority: explicit env wins.
-  if (process.env.DSH_BIN) return process.env.DSH_BIN;
-  if (process.env.DSH_ACP_DSH) return process.env.DSH_ACP_DSH;
-  // Known install locations (most likely first).
-  const candidates = [
-    process.env.DSH_HOME && join(process.env.DSH_HOME, "bin", "dsh"),
-    join(homedir(), ".local", "bin", "dsh"),
-    join(homedir(), ".npm-global", "bin", "dsh"),
-    join("/opt/homebrew", "bin", "dsh"),
-    join("/usr/local", "bin", "dsh"),
-  ].filter(Boolean);
-  for (const p of candidates) {
-    if (isAbsolute(p)) {
-      try {
-        accessSync(p, fsConstants.X_OK);
-        return p;
-      } catch { /* not executable, try next */ }
-    }
-  }
-  // Fall back to bare name (resolved against the process PATH).
-  return "dsh";
-}
+// DSH_BIN 定位与 Windows .cmd 垫片兼容（npm 全局安装的 dsh 无法被 Node 直接
+// spawn：裸名 ENOENT、.cmd EINVAL）统一实现在 doctor.mjs：
+//   detectDshBinary()      → 二进制/垫片路径
+//   resolveDshSpawnSpec()  → { cmd, prefixArgs }，Windows 下解析垫片内的 JS
+//                            入口并改用 process.execPath 直连拉起
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, join as joinPath } from "node:path";
 
 const DSH_BIN = detectDshBinary();
+const DSH_SPAWN = resolveDshSpawnSpec(DSH_BIN);
 const DSH_PROFILE = process.env.DSH_PROFILE ?? "headless";
 const DSH_EXTRA_ARGS = (process.env.DSH_ARGS ?? "").split(" ").filter(Boolean);
 
@@ -258,7 +235,7 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
       patchInfo = modelPatchArgs(model, provider);
       args.splice(args.length - 1, 0, "--patch", patchInfo.file);
     }
-    const child = spawn(DSH_BIN, args, {
+    const child = spawn(DSH_SPAWN.cmd, [...DSH_SPAWN.prefixArgs, ...args], {
       cwd: cwd || process.cwd(),
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],

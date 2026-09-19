@@ -205,6 +205,7 @@ Three screenshots of the plugin in action inside Obsidian Agent Client:
 | `web/obsidian-import.mjs` | Discover + one-click import of Obsidian Agent Client sessions → dsh native store (SessionHandle, V3) |
 | `lib/client.js` | dsh web panel frontend (React): sidebar button + Sessions / DSH Native / Obsidian Import tabs |
 | `install.sh` | one-click installer (DSH profile + Obsidian custom agent) |
+| `install.ps1` | Windows one-click installer (PowerShell edition of install.sh; separates `-PluginProfile` / `-RuntimeProfile`, writes `DSH_BIN=<dsh.cmd>`) |
 | `README.zh-CN.md` | 中文版说明文档 (Chinese) |
 | `README.ru.md` | Документация на русском (Russian) |
 
@@ -243,6 +244,23 @@ Run `./install.sh --help` for every option. Highlights:
 | `--no-obsidian` | skip the Obsidian wiring step |
 | `--dry-run` | preview only, change nothing |
 | `--uninstall` | restore backups, remove the DSH plugin (`dsh plugin remove`) and Obsidian config this script added |
+
+**Windows**: use the PowerShell edition `install.ps1` instead. It separates the
+"plugin target profile" (`-PluginProfile`, default `web`) from the "adapter
+runtime profile" (`-RuntimeProfile`, default `headless`) — conflating the two is
+why `DSH_PROFILE=web` cannot run one-shot prompts (the web app takes no
+positional prompt). It also writes `DSH_BIN=<abs path to dsh.cmd>` into the
+custom agent env (Node cannot spawn the npm shim directly; the adapter resolves
+the cmd-shim and launches it via node), sets `nodePath` /
+`command=node.exe + args=[adapter]`, and omits PATH (Agent Client merges env
+with the parent process).
+
+```powershell
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -DryRun     # preview
+.\install.ps1 -ObsidianVault 'D:\path\to\vault'             # install
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -SkipPlugin # rewire Obsidian only
+.\install.ps1 -Uninstall -ObsidianVault 'D:\path\to\vault'  # restore
+```
 
 ## Standalone usage
 

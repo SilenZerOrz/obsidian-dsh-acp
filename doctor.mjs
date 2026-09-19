@@ -11,13 +11,13 @@
 
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
 // 本插件版本（与 package.json 保持同步）
 export const ADAPTER_VERSION = "0.1.4";
 
-/** 定位 dsh 二进制（与 dsh-acp.mjs 的 detectDshBinary 一致）。 */
+/** 定位 dsh 二进制（唯一实现；dsh-acp.mjs 也从此导入）。 */
 export function detectDshBinary() {
   if (process.env.DSH_BIN) return process.env.DSH_BIN;
   if (process.env.DSH_ACP_DSH) return process.env.DSH_ACP_DSH;
@@ -33,15 +33,81 @@ export function detectDshBinary() {
       try { accessSync(p, fsConstants.X_OK); return p; } catch { /* next */ }
     }
   }
+  // Windows 兜底：npm 全局安装的 dsh 只有 .cmd/.ps1/sh 三种垫片——CreateProcess
+  // 无法执行无扩展名 sh 垫片，Node spawn 也不做 PATHEXT 解析（裸名 → ENOENT），
+  // 所以在 PATH 上显式找 dsh.cmd。
+  if (process.platform === "win32") {
+    for (const dir of (process.env.PATH ?? "").split(";")) {
+      if (!dir) continue;
+      const p = join(dir.trim(), "dsh.cmd");
+      try { accessSync(p, fsConstants.X_OK); return p; } catch { /* next */ }
+    }
+  }
   return "dsh";
 }
 
 const DSH_BIN = detectDshBinary();
 
+/**
+ * Windows 兼容：把 detectDshBinary() 的结果转换为可直接 spawn 的形式。
+ *
+ * 背景：npm 全局安装的 dsh 在 Windows 上是 .cmd 垫片（如 %APPDATA%\npm\dsh.cmd）。
+ * Node 的 spawn（无 shell）对裸名不做 PATHEXT 解析（ENOENT），且 Node >= 18.20
+ * 出于 CVE-2024-27980 禁止无 shell 直接 spawn .cmd/.bat（EINVAL）。因此解析
+ * npm cmd-shim 里的真实 JS 入口，改用当前 node 可执行文件直连拉起——参数数组
+ * 保持不变，多行 prompt 不会被 shell 二次解析。
+ *
+ * @param {string} [binPath=detectDshBinary()]
+ * @returns {{ cmd: string, prefixArgs: string[] }} spawn(cmd, [...prefixArgs, ...args])
+ */
+export function resolveDshSpawnSpec(binPath = DSH_BIN) {
+  if (process.platform !== "win32") return { cmd: binPath, prefixArgs: [] };
+  // 1) 显式 .cmd/.bat 垫片路径（含 DSH_BIN 直接指向垫片的情况）
+  if (/\.(cmd|bat)$/i.test(binPath)) {
+    const entry = parseCmdShimEntry(binPath);
+    if (entry) return { cmd: process.execPath, prefixArgs: [entry] };
+    return { cmd: binPath, prefixArgs: [] };
+  }
+  // 2) 裸名 / 无扩展名（sh 垫片无法被 CreateProcess 执行）：在 PATH 或同目录找 .cmd
+  if (!/\.(exe|node)$/i.test(binPath)) {
+    const shim = findCmdShimOnPath(binPath);
+    if (shim) {
+      const entry = parseCmdShimEntry(shim);
+      if (entry) return { cmd: process.execPath, prefixArgs: [entry] };
+    }
+  }
+  return { cmd: binPath, prefixArgs: [] };
+}
+
+/** 在 PATH（绝对路径则在其同目录）上找 <name>.cmd 垫片。 */
+function findCmdShimOnPath(name) {
+  const base = `${name.replace(/\.(cmd|bat|exe)$/i, "")}.cmd`;
+  const dirs = isAbsolute(name) ? [dirname(name)] : (process.env.PATH ?? "").split(";");
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const p = join(dir.trim(), base);
+    try { accessSync(p, fsConstants.X_OK); return p; } catch { /* next */ }
+  }
+  return null;
+}
+
+/** 解析 npm cmd-shim 中被引号包住的 JS 入口路径（%dp0% / %~dp0 → 垫片目录）。 */
+function parseCmdShimEntry(cmdFile) {
+  try {
+    const text = readFileSync(cmdFile, "utf8");
+    // 典型形态：endLocal & ... & "%_prog%"  "%dp0%\node_modules\...\lib\bin.js" %*
+    const m = text.match(/"([^"]+\.js)"/);
+    if (!m) return null;
+    const shimDir = dirname(cmdFile);
+    return m[1].replace(/%dp0%/gi, shimDir).replace(/%~dp0/gi, shimDir);
+  } catch { return null; }
+}
+
 /** 读取 dsh 版本（不阻塞）。 */
 export function getDshVersion() {
   try {
-    const r = spawnSync(DSH_BIN, ["--version"], { encoding: "utf8", timeout: 8000 });
+    const spec = resolveDshSpawnSpec();
+    const r = spawnSync(spec.cmd, [...spec.prefixArgs, "--version"], { encoding: "utf8", timeout: 8000 });
     if (r.status === 0 && r.stdout) return r.stdout.trim().split("\n")[0];
     return r.stderr?.trim() || null;
   } catch { return null; }

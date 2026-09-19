@@ -36,13 +36,14 @@ function nodeToWebReadable(nodeStream) {
   });
 }
 
-// Spawn the dsh-acp adapter DIRECTLY as the executable (no `node` prefix),
-// exactly like Obsidian's Agent Client does via the custom-agent `command`.
-// Defaults to the repository-root `dsh-acp.mjs` (single implementation source,
-// REQ-07); override with DSH_ACP_BIN.
+// Spawn the dsh-acp adapter, exactly like Obsidian's Agent Client does via the
+// custom-agent `command`. On Windows a .mjs file is not directly spawnable, so
+// launch it via the current node executable. Defaults to the repository-root
+// `dsh-acp.mjs` (single implementation source, REQ-07); override with DSH_ACP_BIN.
 const adapterBin =
   process.env.DSH_ACP_BIN ?? fileURLToPath(new URL("../dsh-acp.mjs", import.meta.url));
-const child = spawn(adapterBin, [], {
+const win32 = process.platform === "win32";
+const child = spawn(win32 ? process.execPath : adapterBin, win32 ? [adapterBin] : [], {
   cwd: process.cwd(),
   env: { ...process.env },
   stdio: ["pipe", "pipe", "pipe"],
