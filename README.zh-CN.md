@@ -139,6 +139,7 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `scripts/test-client.js` | 用于独立验证的 ACP 客户端测试工具 |
 | `acp-feature-test.mjs` | 协议层功能测试（list / fork / resume / archive；`--runtime long|spawn`） |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
+| `install.ps1` | Windows 一键安装脚本（PowerShell 版 install.sh；`-PluginProfile` 装插件、`-RuntimeProfile headless` 跑任务，自动写入 `DSH_BIN=<dsh.cmd>`） |
 
 ## 一键安装
 
@@ -160,6 +161,25 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 # 只装 DSH，跳过 Obsidian
 ./install.sh --no-obsidian
 ```
+
+**Windows**：改用 PowerShell 版 `install.ps1`。注意它把「插件安装目标」与「适配器运行时
+profile」分开（install.sh 混用两者正是 `DSH_PROFILE=web` 跑不起来一次性任务的根源）：
+
+```powershell
+# 先预演（推荐，不改任何东西）
+.\install.ps1 -ObsidianVault 'D:\任意\vault\路径' -DryRun
+
+# 正式安装：插件装进 web profile（面板所在处），适配器任务跑 headless profile
+.\install.ps1 -ObsidianVault 'D:\任意\vault\路径'
+
+# 只重配 Obsidian，不动 profile 里的插件
+.\install.ps1 -ObsidianVault 'D:\任意\vault\路径' -SkipPlugin
+```
+
+它会把 `DSH_BIN=<dsh.cmd 绝对路径>`、`DSH_PROFILE=headless`、`DSH_ACP_LOG_DIR`
+写入 Obsidian 的自定义代理 env（Agent Client 与父环境合并，无需写 PATH），并设置
+`nodePath`/`command=node.exe + args=[adapter]`（Windows 不能直接 spawn .mjs）。
+运行 `Get-Help .\install.ps1`（或看文件头注释）查看全部选项。
 
 运行 `./install.sh --help` 查看全部选项。要点：
 
