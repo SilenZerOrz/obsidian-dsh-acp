@@ -11,11 +11,14 @@
 // events carry known caveats (see below) that #95 must handle.
 //
 // ENV-GATED: skips (node:test skip) unless DSH_ACP_REAL_LLM_KEY is set. Never part
-// of the default 104-test CI run. Run manually:
-//   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' ../../01wenlv_agent_projects/.env | cut -d= -f2- | tr -d '\"')"
-//   export DSH_ACP_REAL_LLM_BASE="http://llm.example.com/v1"
-//   export DSH_ACP_REAL_LLM_MODEL="Qwen3.8-Flash-Next UD-Q4_K_XL"
+// of the default CI run. Run manually:
+//   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' <path-to>/.env | cut -d= -f2- | tr -d '\"')"
 //   node --test test/official-bridge-realllm-alignment.test.mjs
+// Endpoint + model id default to the constants in test/fixtures/qwen-shenke-adapter.mjs
+// (qwenRealConfig) and are overridable via DSH_ACP_REAL_LLM_BASE(_URL) /
+// DSH_ACP_REAL_LLM_MODEL — deliberately NOT hard-coded here, because the self-hosted
+// endpoint's model list changes over time. To discover the live list:
+//   curl -H "Authorization: Bearer $DSH_ACP_REAL_LLM_KEY" "$BASE/models"
 // The key only ever comes from env in THIS process — it is never printed or committed.
 //
 // Not covered here (per #96 scope): bash execution, approval popup, tool result

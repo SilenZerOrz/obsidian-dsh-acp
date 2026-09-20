@@ -18,10 +18,13 @@
 //
 // ENV-GATED: skips (node:test skip) unless DSH_ACP_REAL_LLM_KEY is set. Never part
 // of the default unit CI run. Run manually:
-//   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' ../../01wenlv_agent_projects/.env | cut -d= -f2- | tr -d '\"')"
-//   export DSH_ACP_REAL_LLM_BASE="http://llm.example.com/v1"
-//   export DSH_ACP_REAL_LLM_MODEL="Qwen3.8-Flash-Next UD-Q4_K_XL"
+//   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' <path-to>/.env | cut -d= -f2- | tr -d '\"')"
 //   node --test test/official-bridge-realllm-tool.test.mjs
+// Endpoint + model id default to the constants in test/fixtures/qwen-shenke-adapter.mjs
+// (qwenRealConfig) and are overridable via DSH_ACP_REAL_LLM_BASE(_URL) /
+// DSH_ACP_REAL_LLM_MODEL — deliberately NOT hard-coded here (the endpoint's model
+// list changes). Discover the live list:
+//   curl -H "Authorization: Bearer $DSH_ACP_REAL_LLM_KEY" "$BASE/models"
 // The key only ever comes from env in THIS process — never printed or committed.
 // Real-LLM tool 实证 is a #96 (收尾) artifact; #95 itself uses only the stub LLM.
 
