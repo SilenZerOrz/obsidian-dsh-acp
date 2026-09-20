@@ -91,6 +91,12 @@ const child = spawn(process.execPath, [adapterBin], {
     // P1.0: spawn fallback is on by default; long-mode init throws placeholder
     // so the adapter falls back to spawn and the protocol-layer test still runs.
     DSH_ACP_SPAWN_FALLBACK: "true",
+    // Force spawn: this test exercises the ACP protocol layer with a stubbed
+    // backend (DSH_BIN=echo). The adapter otherwise probes a locally-running
+    // dsh web gateway (default opt-in) and proxies session/list|fork|prompt to
+    // it — pulling in that gateway's real persistent sessions and breaking the
+    // `list ... has N sessions` counts. Not a secret/env knob: isolation only.
+    DSH_ACP_PROXY_MODE: "false",
     // P1.5 step 4: --mock-llm installs a fake cordis ctx that returns a
     // canned StreamChunk sequence. Used to exercise the long path end-to-end.
     ...(mockLlm ? { DSH_ACP_MOCK_LLM: "1", DSH_ACP_DEFAULT_MODEL_FOR_TEST: "default/test-model" } : {}),
