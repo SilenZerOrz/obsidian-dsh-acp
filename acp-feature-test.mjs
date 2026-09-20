@@ -197,6 +197,11 @@ await app.connectWith(stream, async (ctx) => {
       "fork inherits 'default' (M2.4 revert — currentModeId='default' on fork)",
       fkLoad?.modes?.currentModeId === "default",
     );
+    // This GAP block's throwaway fork would otherwise bump the session count
+    // and break the later "list after fork has 2 sessions" assertion (section 4
+    // expects exactly 1 fork to have happened by then). Delete the child so the
+    // count returns to 1 before section 4.
+    await ctx.request(methods.agent.session.delete, { sessionId: fk.sessionId, cwd: workdir });
   }
 
   // 6. prompt round-trips and archives

@@ -14,7 +14,7 @@
 // of the default 104-test CI run. Run manually:
 //   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' ../../01wenlv_agent_projects/.env | cut -d= -f2- | tr -d '\"')"
 //   export DSH_ACP_REAL_LLM_BASE="http://llm.example.com/v1"
-//   export DSH_ACP_REAL_LLM_MODEL="Qwen3.8"
+//   export DSH_ACP_REAL_LLM_MODEL="Qwen3.8-Flash-Next UD-Q4_K_XL"
 //   node --test test/official-bridge-realllm-alignment.test.mjs
 // The key only ever comes from env in THIS process — it is never printed or committed.
 //
