@@ -34,3 +34,6 @@ obsidian-dsh-acp-*.tgz
 
 # awesome-dsh-plugin submission draft (do NOT commit — local-only)
 awesome-dsh-plugin/
+
+# Local dev test fixtures (need the global dsh install; not portable)
+test/fixtures/
