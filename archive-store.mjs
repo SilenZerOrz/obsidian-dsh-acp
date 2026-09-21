@@ -37,7 +37,7 @@ export function dshHome() {
  * Encode an absolute cwd into the DSH sessions directory name.
  * Mirror of DSH's scheme: drop the leading "/", replace every non
  * [A-Za-z0-9] char with "-", then wrap in "--…--".
- *   /home/user/.npm-global/bin -> --Users-jlwl-.npm-global-bin--
+ *   /home/user/projects/app -> --home-user-projects-app--
  */
 export function encodeWorkspace(cwd) {
   const cleaned = String(cwd).replace(/^\/+/, "").replace(/[^A-Za-z0-9]/g, "-");

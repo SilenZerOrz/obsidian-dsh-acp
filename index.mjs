@@ -337,8 +337,8 @@ export const inject = [];
  *   - `runtime.spawnFallback` — if true (default), long init failure falls back to spawn.
  *   - `permission.{mode,editTools,enableRootBypass}` — 4-mode permission gate; consumed by
  *     both the cordis plugin (long) and the spawned adapter (env-mirrored). The legacy
- *     `permission.timeoutMs` is now optional and ignored — see Phase B note in
- *     `~/projects/app/notes/踩坑经验/obsidian-dsh-acp/obsidian-dsh-acp-权限链路工具卡断排查记录.md`.
+ *     `permission.timeoutMs` is now optional and ignored (see the Phase B
+ *     permission-linkage notes in the project's local dev docs).
  */
 export const Config = z.object({
 	spawn: z.boolean().default(true),

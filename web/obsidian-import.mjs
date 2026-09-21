@@ -10,9 +10,9 @@
 //      importObsidianSessionAsDsh(ctx, jsonPath) 写入 dsh 原生会话（agents.create +
 //      sp.create+append 回退），左侧可见、可接续、共享工具/preset
 //
-// vault 目录来源（优先级）：env DSH_ACP_OBSIDIAN_DIRS（分号分隔）> 内置探测
-// ~/Documents/Obsidian Vault 与 ~/projects 及 $HOME 下 name 含 "Obsidian"/"Vault"/"Documents"
-// 的目录（避免硬编码用户路径）。可覆盖防止探到无关目录。
+// vault 目录来源（优先级）：env DSH_ACP_OBSIDIAN_DIRS（分号/逗号分隔）> 内置探测
+// $HOME 下 name 含 "Obsidian"/"Vault" 的目录。env 覆盖用于指向非常规位置的 vault，
+// 也用于防止探测误入无关目录。此处不硬编码任何用户路径。
 import { readdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -76,21 +76,19 @@ function configuredVaults() {
 function detectVaults() {
   const home = homedir();
   const candidates = new Set();
-  // 已知常见位置（不依赖探测也加一份）
-  for (const p of [
-    resolve(home, "Documents/Obsidian Vault"),
-    resolve(home, "projects/app"),
-  ]) {
+  // 常见位置（不依赖探测也加一份）：Mac/iOS 风格的默认 vault 目录。
+  for (const p of [resolve(home, "Documents/Obsidian Vault")]) {
     const sp = join(p, OBSIDIAN_SUBDIR);
     if (existsSync(sp)) candidates.add(p);
   }
-  // 兜底：$HOME 一级目录里名字像 vault 的
+  // 兜底：$HOME 一级目录里名字像 vault 的（通用词，不含用户特定名）。
+  // 非常规路径用 env DSH_ACP_OBSIDIAN_DIRS 指定。
   let entries = [];
   try { entries = readdirSync(home, { withFileTypes: true }); } catch { entries = []; }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
     const n = e.name;
-    if (/obsidian|vault|documents/i.test(n)) {
+    if (/obsidian|vault/i.test(n)) {
       const sp = join(home, n, OBSIDIAN_SUBDIR);
       if (existsSync(sp)) candidates.add(join(home, n));
     }

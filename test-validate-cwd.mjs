@@ -45,7 +45,7 @@ for (const v of [undefined, null, ""]) {
 
 // 2. relative path → throws InvalidParams with clear message
 try {
-  validateCwdParam("projects", "session/new");
+  validateCwdParam("relative-dir", "session/new");
   ko("relative cwd", "should have thrown");
 } catch (e) {
   if (e instanceof RequestError && /must be an absolute path/.test(e.message)) {
@@ -69,7 +69,7 @@ try {
 
 // 4. path exists but is a file → throws "not a directory"
 try {
-  validateCwdParam("/home/user/.npm-global/bin/dsh", "session/new");
+  validateCwdParam(process.execPath, "session/new"); // any existing file path
   ko("cwd is a file", "should have thrown");
 } catch (e) {
   if (e instanceof RequestError && /cwd is not a directory/.test(e.message)) {
@@ -80,7 +80,7 @@ try {
 }
 
 // 5. valid existing directory → returns cwd unchanged
-const goodCwd = "/home/user/projects";
+const goodCwd = process.cwd(); // any existing directory
 try {
   const r = validateCwdParam(goodCwd, "session/new");
   if (r === goodCwd) ok("valid cwd → returns cwd unchanged");
