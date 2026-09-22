@@ -41,13 +41,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "start": "node dsh-acp.mjs",
-    "test": "node acp-feature-test.mjs",
-    "test:unit": "node --test test/runtime-switch.test.mjs test/long-runtime.test.mjs test/config-schema.test.mjs test/chunk-mapper.test.mjs test/llm-event-bridge.test.mjs test/permission-gate.test.mjs test/session-config.test.mjs test/settings-provider-catalog.test.mjs test/http-gateway.test.mjs test/proxy-mode.test.mjs test/http-gateway-bidi.test.mjs test/acp-tool-translation.test.mjs",
-    "test:officials": "node --test test/acp-official-router.test.mjs test/dsh-acp-apply-spike.test.mjs test/official-bridge-alignment.test.mjs test/http-gateway-official.test.mjs test/http-gateway-tool-translation.test.mjs test/http-gateway-tool-translation-concurrent.test.mjs test/acp-official-router-session-c.test.mjs test/http-gateway-session-c.test.mjs",
-    "test:protocol": "node acp-feature-test.mjs",
-    "test:long": "node acp-feature-test.mjs --runtime long",
-    "test:all": "npm run test:unit && npm run test:protocol && npm run test:long"
+    "start": "node dsh-acp.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
