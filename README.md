@@ -189,6 +189,26 @@ Three screenshots of the plugin in action inside Obsidian Agent Client:
 - Node.js >= 22.13
 - A bootable `dsh` backend (see [Headless profile bootstrap](#headless-profile-bootstrap))
 
+## dsh version support
+
+| dsh version | legacy spawn | P2 long-running | official bridge |
+|---|---|---|---|
+| `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅ (env switch) |
+| `0.1.5-rc.3` | ✅ | ❌ | ✅ (env switch) |
+
+**`0.1.5-rc.3` degrades gracefully.** The P2 subpackages
+(`@deepseek-ai/dsh-{agent-loop,llm,acp}`) are probed at runtime by
+`lib/version-detect.mjs::hasP2Apis()`. On `0.1.5-rc.x` the probe reports
+`false`, which forces `runtime.mode = spawn` — so the adapter keeps working
+with full session support (V3 sessions, `session/list`, `session/fork`,
+`session/delete`, archives) and simply omits the P2 long-running features
+(tool-approval dialogs, live reasoning/tool streams).
+
+This is a **conservative gate, not a bug**: the rc line does ship the
+subpackages, but long-running mode has not been validated against it, so the
+adapter deliberately falls back to the spawn path rather than risk
+`ERR_MODULE_NOT_FOUND` at import time.
+
 ## Files
 
 | Path | Role |

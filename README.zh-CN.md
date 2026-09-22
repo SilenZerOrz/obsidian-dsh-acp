@@ -124,6 +124,22 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 - Node.js >= 22.13
 - 可正常启动的 `dsh` 后端（参见 [Headless profile 引导](#headless-profile-引导)）
 
+## dsh 版本支持
+
+| dsh 版本 | legacy spawn | P2 长驻 | official 桥 |
+|---|---|---|---|
+| `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅（env 开关） |
+| `0.1.5-rc.3` | ✅ | ❌ | ✅（env 开关） |
+
+**`0.1.5-rc.3` 是优雅降级。** P2 子包（`@deepseek-ai/dsh-{agent-loop,llm,acp}`）
+由 `lib/version-detect.mjs::hasP2Apis()` 在运行时探测。在 `0.1.5-rc.x` 上探测结果为
+`false`，会强制 `runtime.mode = spawn`——适配器继续工作，会话功能完整
+（V3 会话、`session/list`、`session/fork`、`session/delete`、归档），只是没有 P2
+长驻特性（工具审批弹窗、思考/工具实时流）。
+
+这是**保守门禁，不是 bug**：rc 线实际含这些子包，但长驻模式尚未在 rc.3 上验证，
+适配器宁可回退 spawn 路径，也不冒 import 时 `ERR_MODULE_NOT_FOUND` 的风险。
+
 ## 文件
 
 | 路径 | 作用 |
