@@ -197,9 +197,6 @@ Three screenshots of the plugin in action inside Obsidian Agent Client:
 | `archive-store.mjs` | Persistent session store + DSH-format archive writer |
 | `index.mjs` | cordis plugin entry (`dsh.acp` service + adapter process manager) |
 | `cordis.patch.yml` | plugin insert layer for `dsh plugin ... add obsidian-dsh-acp` |
-| `scripts/dsh-acp.js` | ACP server adapter (runtime reference copy) |
-| `scripts/test-client.js` | ACP client harness for standalone verification |
-| `acp-feature-test.mjs` | Protocol-level feature test (list / fork / resume / archive) |
 | `session-manage.mjs` | P1b session management core (export / archive / move workspace / list) |
 | `web/session-panel.mjs` | dsh web panel backend: `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` routes |
 | `web/obsidian-import.mjs` | Discover + one-click import of Obsidian Agent Client sessions → dsh native store (SessionHandle, V3) |
@@ -250,7 +247,6 @@ With the package installed (or directly from a checkout):
 
 ```bash
 node dsh-acp.mjs            # serve ACP v1 on stdin/stdout
-node scripts/test-client.js "reply with just the word HELLO"
 node dsh-acp.mjs doctor     # health-check + one-click repair hints (v0.1.x experimental)
 ```
 

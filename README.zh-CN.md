@@ -135,9 +135,6 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `lib/long-runtime.mjs` | long 模式 LongRuntime class（v0.2.2 占位；P1.5+ 接入 ctx.llm.stream） |
 | `lib/client.js` | dsh web React 面板（**0.2.1 默认隐藏** npm `files`，仅 test 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
-| `scripts/dsh-acp.js` | ACP 服务器适配器（运行时参考副本） |
-| `scripts/test-client.js` | 用于独立验证的 ACP 客户端测试工具 |
-| `acp-feature-test.mjs` | 协议层功能测试（list / fork / resume / archive；`--runtime long|spawn`） |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
 
 ## 一键安装
@@ -181,7 +178,6 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
 ```bash
 node dsh-acp.mjs            # 在 stdin/stdout 上提供 ACP v1 服务
-node scripts/test-client.js "reply with just the word HELLO"
 ```
 
 ### 配置（Obsidian Agent Client）

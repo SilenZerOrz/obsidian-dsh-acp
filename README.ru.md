@@ -261,9 +261,6 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `web/session-panel.mjs` | Бэкенд dsh web-панели: маршруты `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` |
 | `web/obsidian-import.mjs` | Обнаружение и импорт в один клик сессий Obsidian Agent Client → dsh native-хранилище (SessionHandle, V3) |
 | `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
-| `scripts/dsh-acp.js` | Адаптер ACP-сервера (тонкая прокладка, см. REQ-07) |
-| `scripts/test-client.js` | Клиентское тестовое окружение ACP для автономной проверки |
-| `acp-feature-test.mjs` | Протокольный функциональный тест (list / fork / resume / archive; `--runtime long|spawn`) |
 | `doctor.mjs` | Диагностика здоровья (v0.1.5, версия-агностик) + подсказки ремонта |
 | `gc.mjs` | Сборка мусора сессий (v0.1.5): сверка с Obsidian на `session/list` |
 | `import-session.mjs` | Импорт внешней ACP-сессии (v0.1.6) |
@@ -315,7 +312,6 @@ custom agent для плагина **Agent Client** в Obsidian, с опцион
 
 ```bash
 node dsh-acp.mjs                       # обслуживать ACP v1 на stdin/stdout
-node scripts/test-client.js "reply with just the word HELLO"
 node dsh-acp.mjs doctor                # проверка здоровья + подсказки ремонта (v0.1.5 experimental)
 ```
 

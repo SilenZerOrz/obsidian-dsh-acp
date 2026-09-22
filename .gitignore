@@ -37,3 +37,9 @@ awesome-dsh-plugin/
 
 # Local dev test fixtures (need the global dsh install; not portable)
 test/fixtures/
+
+# Local-only test suite + dev scripts (not part of the npm package)
+test/
+scripts/
+acp-feature-test.mjs
+test-validate-cwd.mjs
