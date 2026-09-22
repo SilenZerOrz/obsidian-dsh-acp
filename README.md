@@ -78,6 +78,27 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 
 `session/resume` and `session/load` reopen an existing stored session.
 
+### 0.3.0-rc.1 — Official bridge beta
+
+> **Beta release (2026-09-22, npm tag `rc`)**: opt in with
+> `DSH_ACP_USE_OFFICIAL_BRIDGE=1`. Routes prompts through `dsh.apply()` (the
+> official DSH ACP bridge) instead of the legacy long-runtime path.
+>
+> **DoD status** (verified by `test/http-gateway-official-dod.test.mjs`, real
+> LLM Qwen3.8-Flash-Next, 60 s timeout):
+>
+> | v2 plan §0.3 DoD | Status |
+> |------------------|--------|
+> | #1 `tool_call_update` (in_progress + completed) | ✅ PASS — official path now wires `createUpdateTranslator` (Session A) |
+> | #2 `session/request_permission` popup | ❌ known gap — official router does not yet hang PermissionGate (deferred to 0.3.0) |
+> | #3 cwd 越权 validation | ❌ known gap — router hardcodes `process.cwd()` in `ensureSession` (deferred to 0.3.0) |
+>
+> **Known gaps**: see `docs/实施计划/0.3.0-rc.1-known-gaps.md` for full data
+> (real frames counts, fail reasons, repair plan).
+>
+> **To install the beta explicitly** (avoid the `latest` stable line):
+> `npm install obsidian-dsh-acp@rc`.
+
 ### Session model switching (v0.1.6)
 
 Each session can carry its own model. The adapter advertises a `model` session
