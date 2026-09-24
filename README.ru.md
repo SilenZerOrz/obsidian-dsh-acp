@@ -307,6 +307,15 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 > **Явная установка тест-версии** (без загрязнения стабильной ветки `latest`):
 > `npm install obsidian-dsh-acp@rc`
 
+### Известные ограничения (0.3.0-rc.1)
+
+**Official-мост требует**, чтобы in-process cordis ctx dsh предоставлял службы `llm`, `agents`, `sessions`, `sessionPersistence`, прежде чем сможет управлять `dsh.apply()`.
+
+- **Текущие версии dsh на типичном `web`-профиле этого не дают**: `@deepseek-ai/dsh-llm@0.1.6-alpha.1` не регистрирует свой typert-manifest (`parameter codec has no create() factory`), а web-профиль не загружает service-provider'ы. `probeOfficialBridge(ctx)` возвращает `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`.
+- **Поведение fallback**: если вы задали `DSH_ACP_USE_OFFICIAL_BRIDGE=1`, но службы недоступны, адаптер выведет одноразовое предупреждение в stderr и **откатится на legacy long-runtime** — вы получите реальный вывод модели, а не пустой SSE.
+- **Обычные пользователи не затронуты**: без `DSH_ACP_USE_OFFICIAL_BRIDGE` используется обычный legacy spawn (работает и сегодня).
+- **Трекинг апстрима**: https://github.com/deepseek-ai/deepseek-harness/issues (дефект typert-codec dsh-llm + отсутствие service-provider в web-профиле). Когда dsh выпустит исправление, official-мост заработает без изменений адаптера.
+
 ## Быстрая установка (в один клик)
 
 В пакете есть `install.sh` — параметризованный установщик, который: (a) устанавливает

@@ -99,6 +99,28 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 > **To install the beta explicitly** (avoid the `latest` stable line):
 > `npm install obsidian-dsh-acp@rc`.
 
+### Known Limitations (0.3.0-rc.1)
+
+The **official bridge requires** dsh's in-process cordis ctx to expose `llm`,
+`agents`, `sessions`, `sessionPersistence` services before it can drive
+`dsh.apply()`.
+
+- **Current dsh releases do NOT satisfy this** on a typical `web` profile:
+  `@deepseek-ai/dsh-llm@0.1.6-alpha.1` fails to register its typert manifest
+  (`parameter codec has no create() factory`), and the web profile does not
+  load the service-provider packages. `probeOfficialBridge(ctx)` reports
+  `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`.
+- **Fallback behavior**: if you set `DSH_ACP_USE_OFFICIAL_BRIDGE=1` but the
+  services are unavailable, the adapter logs a one-shot stderr warning and
+  falls back to the **legacy long-runtime path** — you still get real model
+  output instead of an empty SSE stream.
+- **Default users are unaffected**: leaving `DSH_ACP_USE_OFFICIAL_BRIDGE`
+  unset routes through the normal legacy spawn path, which works today.
+- **Upstream tracking**: https://github.com/deepseek-ai/deepseek-harness/issues
+  (for the dsh-llm typert codec defect + missing web-profile service providers).
+  Once dsh ships a fixed version, the official bridge becomes usable without
+  adapter changes.
+
 ### Session model switching (v0.1.6)
 
 Each session can carry its own model. The adapter advertises a `model` session

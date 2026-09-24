@@ -172,6 +172,15 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 > **显式装测试版**（避免污染 `latest` 稳定线）：
 > `npm install obsidian-dsh-acp@rc`
 
+### 已知限制（0.3.0-rc.1）
+
+**官方桥要求** dsh 的 in-process cordis ctx 暴露 `llm`、`agents`、`sessions`、`sessionPersistence` 4 个服务，才能驱动 `dsh.apply()`。
+
+- **当前 dsh 版本在典型 `web` profile 下不满足**：`@deepseek-ai/dsh-llm@0.1.6-alpha.1` 的 typert manifest 注册失败（`parameter codec has no create() factory`），且 web profile 未加载 service-provider 包。`probeOfficialBridge(ctx)` 返回 `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`。
+- **fallback 行为**：如果你设了 `DSH_ACP_USE_OFFICIAL_BRIDGE=1` 但服务不可用，adapter 会输出一次性 stderr 警告并**回退到 legacy long-runtime 路径**——你仍能拿到真实模型输出，而不是空 SSE 流。
+- **默认用户不受影响**：不设 `DSH_ACP_USE_OFFICIAL_BRIDGE` 走正常 legacy spawn 路径，今天就能用。
+- **上游跟踪**：https://github.com/deepseek-ai/deepseek-harness/issues （dsh-llm typert codec 缺陷 + web profile 缺 service provider）。dsh 修好新版本后，官方桥无需改 adapter 即可用。
+
 ## 一键安装
 
 包内附带 `install.sh` —— 一个参数化安装脚本，可以 (a) 通过官方 `dsh plugin add`

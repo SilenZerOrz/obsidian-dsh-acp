@@ -409,14 +409,14 @@ export function apply(ctx, config) {
 	// registerSessionPanelRoutes，让原生路由（dsh-list / dsh-read / obsidian-import）
 	// 通过 ctx.get('sessionPersistence' | 'agents' | ...) 访问 host 服务。
 	if (config.enableWebPanel !== false && typeof ctx.inject === "function") {
-		ctx.inject(["webServer"], (webCtx) => {
+		ctx.inject(["webServer"], async (webCtx) => {
 			if (webCtx && webCtx.webServer && typeof webCtx.webServer.register === "function") {
 				registerSessionPanelRoutes(ctx, webCtx.webServer);
 				ctx?.logger?.info?.("[dsh-acp] web 面板路由已注册: /api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}");
 				// P3.0 commit 2: 暴露 dsh-acp proxy 端点(probe + prompt SSE),让独立
 				// dsh-acp.mjs 进程能经 HTTP/SSE 调 long-runtime,无需 cordis ctx。
 				// 路由已挂载,long-runtime 仍 lazy init(在第一次 prompt 触发)。
-				registerHttpGateway(ctx, webCtx.webServer);
+				await registerHttpGateway(ctx, webCtx.webServer);
 				ctx?.logger?.info?.("[dsh-acp] HTTP gateway 已注册: /acp/proxy/{probe,session/prompt}");
 			}
 		});
