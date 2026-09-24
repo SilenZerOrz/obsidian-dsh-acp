@@ -128,6 +128,7 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
 | dsh 版本 | legacy spawn | P2 长驻 | official 桥 |
 |---|---|---|---|
+| `0.3.0-rc.1` | ✅ | ✅ | ✅（env 开关，**官方桥 beta**；DoD #1 PASS / #2/#3 留 0.3.0） |
 | `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅（env 开关） |
 | `0.1.5-rc.3` | ✅ | ❌ | ✅（env 开关） |
 
@@ -149,9 +150,27 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器；long 模式 in-process host） |
 | `lib/runtime-switch.mjs` | 双 runtime mode 解析 + 4-mode permission config + tryLongFallbackSpawn |
 | `lib/long-runtime.mjs` | long 模式 LongRuntime class（v0.2.2 占位；P1.5+ 接入 ctx.llm.stream） |
-| `lib/client.js` | dsh web React 面板（**0.2.1 默认隐藏** npm `files`，仅 test 分支打包） |
+| `lib/client.js` | dsh web React 面板（**0.2.1 / 0.3.0-rc.1 默认隐藏** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
+
+### 0.3.0-rc.1 — Official 桥 beta（测试版）
+
+> **测试版（2026-09-22，npm tag `rc`）**：用 `DSH_ACP_USE_OFFICIAL_BRIDGE=1` 启用。
+> 把 prompt 路由到 `dsh.apply()`（官方 DSH ACP 桥），不再走 legacy long-runtime。
+>
+> **DoD 实测状态**（由 `test/http-gateway-official-dod.test.mjs` 验证，真 Qwen3.8-Flash-Next，60s timeout）：
+>
+> | v2 plan §0.3 DoD | 状态 |
+> |------------------|------|
+> | #1 `tool_call_update`（in_progress + completed）| ✅ **PASS** — 官方路径已接 `createUpdateTranslator`（Session A）|
+> | #2 `session/request_permission` 弹窗 | ❌ 已知缺口 — 官方路由器尚未挂 PermissionGate（留 0.3.0）|
+> | #3 cwd 越权校验 | ❌ 已知缺口 — 路由器在 `ensureSession` 里硬编码 `process.cwd()`（留 0.3.0）|
+>
+> **已知缺口完整数据**：见 `docs/实施计划/0.3.0-rc.1-known-gaps.md`（含 frames 计数、用时、修复方向）。
+>
+> **显式装测试版**（避免污染 `latest` 稳定线）：
+> `npm install obsidian-dsh-acp@rc`
 
 ## 一键安装
 

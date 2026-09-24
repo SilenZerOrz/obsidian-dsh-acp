@@ -248,6 +248,7 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 
 | Версия dsh | legacy spawn | P2 long-running | official bridge |
 |---|---|---|---|
+| `0.3.0-rc.1` | ✅ | ✅ | ✅ (env switch, **official-мост beta**; DoD #1 PASS / #2/#3 оставлены на 0.3.0) |
 | `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅ (env switch) |
 | `0.1.5-rc.3` | ✅ | ❌ | ✅ (env switch) |
 
@@ -276,7 +277,7 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `lib/llm-event-bridge.mjs` | Класс LLMStreamBridge: ctx.llm.stream() → ACP update (P1.5) |
 | `lib/permission-gate.mjs` | 4-mode permission gate + кэш + таймаут (P2.0) |
 | `lib/settings-provider-catalog.mjs` | Каталог провайдеров + моделей для FE-1 двух-уровневого переключения (v0.2.3) |
-| `lib/client.js` | React-панель dsh web (**в v0.2.1 по умолчанию скрыта** в npm `files`, упаковывается только в test-ветке) |
+| `lib/client.js` | React-панель dsh web (**в v0.2.1 / 0.3.0-rc.1 по умолчанию скрыта** в npm `files`, упаковывается только в test-ветке `test/p1b-dsh-web-ui`) |
 | `web/session-panel.mjs` | Бэкенд dsh web-панели: маршруты `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` |
 | `web/obsidian-import.mjs` | Обнаружение и импорт в один клик сессий Obsidian Agent Client → dsh native-хранилище (SessionHandle, V3) |
 | `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
@@ -287,6 +288,24 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `install.sh` | Установщик в один клик (профиль DSH + custom agent Obsidian) |
 | `README.md` | Документация на английском |
 | `README.zh-CN.md` | Документация на китайском |
+
+### 0.3.0-rc.1 — Official-мост beta (тест-версия)
+
+> **Тест-версия (2026-09-22, npm tag `rc`)**: включите через `DSH_ACP_USE_OFFICIAL_BRIDGE=1`.
+> Маршрутизирует prompt'ы через `dsh.apply()` (официальный DSH ACP-мост) вместо legacy long-runtime.
+>
+> **Статус DoD** (проверено `test/http-gateway-official-dod.test.mjs`, реальный Qwen3.8-Flash-Next, 60s timeout):
+>
+> | v2 plan §0.3 DoD | Статус |
+> |------------------|--------|
+> | #1 `tool_call_update` (in_progress + completed) | ✅ **PASS** — official-путь подключён к `createUpdateTranslator` (Session A) |
+> | #2 Всплывающее окно `session/request_permission` | ❌ известный пробел — official-роутер пока не подключён к PermissionGate (отложено на 0.3.0) |
+> | #3 Валидация cwd за пределами рабочей директории | ❌ известный пробел — роутер в `ensureSession` хардкодит `process.cwd()` (отложено на 0.3.0) |
+>
+> **Полные данные по известным пробелам**: см. `docs/实施计划/0.3.0-rc.1-known-gaps.md` (число кадров, тайминги, план исправлений).
+>
+> **Явная установка тест-версии** (без загрязнения стабильной ветки `latest`):
+> `npm install obsidian-dsh-acp@rc`
 
 ## Быстрая установка (в один клик)
 
