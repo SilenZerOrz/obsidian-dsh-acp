@@ -74,7 +74,8 @@
   ],
   "license": "MIT",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.13",
+    "dsh": ">=0.1.5-rc.3"
   },
   "peerDependenciesMeta": {
     "dsh-better-sidebar": {
