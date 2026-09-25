@@ -39,6 +39,7 @@ import {
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
+import { validateCwd } from "./lib/cwd-validator.mjs";
 import {
   probeDshWebGateway,
   forwardPromptViaHttp,
@@ -323,6 +324,13 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
 // savedSession path (e.g. /Users/admin/... after a rename) is rejected at the
 // session/new|load|fork boundary with a clear InvalidParams error instead of
 // propagating into runDsh() and bubbling up as an opaque spawn failure.
+//
+// Phase 3 (#3, 2026-09-25): shared with `lib/acp-official-router.mjs` via
+// `lib/cwd-validator.mjs::validateCwd()`. The router path throws a plain Error
+// with `code = "INVALID_CWD"` (no ACP SDK on that side); the protocol layer
+// still wraps the result as a `RequestError` so the JSON-RPC envelope stays
+// `code: -32602 InvalidParams` for clients. Both paths share one validation
+// truth.
 /**
  * @param {unknown} cwd
  * @param {string} opName  e.g. "session/new"
@@ -332,27 +340,9 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
  *   a directory — surfaces to the ACP client as InvalidParams.
  */
 function validateCwdParam(cwd, opName) {
-  if (cwd === undefined || cwd === null || cwd === "") return undefined;
-  if (typeof cwd !== "string" || !isAbsolute(cwd)) {
-    throw new RequestError(
-      `${opName}: cwd must be an absolute path (got ${JSON.stringify(cwd)})`,
-    );
-  }
-  let st;
-  try {
-    st = statSync(cwd);
-  } catch (e) {
-    if (e.code === "ENOENT") {
-      throw new RequestError(`${opName}: cwd does not exist: ${cwd}`);
-    }
-    throw new RequestError(
-      `${opName}: cwd not accessible (${e.code ?? e.message}): ${cwd}`,
-    );
-  }
-  if (!st.isDirectory()) {
-    throw new RequestError(`${opName}: cwd is not a directory: ${cwd}`);
-  }
-  return cwd;
+  const res = validateCwd(cwd, opName);
+  if (res.ok) return res.cwd;
+  throw new RequestError(res.error.message);
 }
 
 // ---- ACP helpers ---------------------------------------------------------
