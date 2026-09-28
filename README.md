@@ -391,6 +391,17 @@ If you configure it by editing `data.json` directly:
 }
 ```
 
+### First-time setup
+
+Before the first prompt, select a model in the agent picker (Session panel).
+
+**Why**: if no model is selected, the spawn path falls back to the headless
+profile default (`deepseek-official/deepseek-v4-flash`). If you haven't configured
+a DeepSeek official API key, you'll see `AUTH: Authentication Fails` on the first prompt.
+
+**Fix**: either (a) pick your configured model in the session panel before prompting,
+or (b) set `deepseek-official` credentials in `~/.dsh/profiles/headless/settings.yaml`.
+
 ## cordis plugin usage
 
 Install into a DSH profile via the official plugin mechanism (this makes the

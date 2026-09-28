@@ -255,6 +255,17 @@ node dsh-acp.mjs            # 在 stdin/stdout 上提供 ACP v1 服务
 }
 ```
 
+### 首次使用
+
+第一次发 prompt 之前，请先在代理选择器（Session 面板）里选一个模型。
+
+**原因**：如果没选模型，spawn 路径会 fallback 到 headless profile 的默认值
+（`deepseek-official/deepseek-v4-flash`）。如果你没配 DeepSeek 官方 API key，
+第一条 prompt 就会报 `AUTH: Authentication Fails`。
+
+**修复**：要么 (a) 在 session 面板先选好已配置的模型再发 prompt，要么 (b) 在
+`~/.dsh/profiles/headless/settings.yaml` 里给 `deepseek-official` 配上凭据。
+
 ## cordis 插件用法
 
 通过官方插件机制安装进某个 DSH profile（`package.json` 中的 `dsh.bundle` manifest
