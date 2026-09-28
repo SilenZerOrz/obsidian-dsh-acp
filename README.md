@@ -81,8 +81,8 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 ### 0.3.0 — Tool call frames in spawn path
 
 > **Stable release (2026-09-28, npm tag `latest`)**: tool call frames now appear
-> automatically when an LLM invokes a tool. No configuration required — works
-> automatically when dsh 0.1.7-rc.1+ is installed.
+> automatically when an LLM invokes a tool. Requires a tool-capable model —
+> select one in your agent picker. The adapter itself needs no configuration.
 
 **What you get**
 
@@ -375,14 +375,19 @@ If you configure it by editing `data.json` directly:
 
 ### First-time setup
 
-Before the first prompt, select a model in the agent picker (Session panel).
+Before the first prompt, select a **tool-capable** model that's already configured
+with a valid API key in your agent picker (Session panel), e.g. `gemini-2.5-pro`.
 
-**Why**: if no model is selected, the spawn path falls back to the headless
-profile default (`deepseek-official/deepseek-v4-flash`). If you haven't configured
-a DeepSeek official API key, you'll see `AUTH: Authentication Fails` on the first prompt.
+**Why**: tool call frames only appear when the chosen model supports tool/function
+calling. If no model is selected, the spawn path falls back to the headless
+profile default (`deepseek-official/deepseek-v4-flash`). If that default doesn't
+support tools, or you haven't configured a DeepSeek official API key, you'll see
+`AUTH: Authentication Fails` or a silent no-tool-call response on the first prompt.
 
-**Fix**: either (a) pick your configured model in the session panel before prompting,
-or (b) set `deepseek-official` credentials in `~/.dsh/profiles/headless/settings.yaml`.
+**Fix**: either (a) pick a tool-capable, configured model in the session panel
+before prompting, or (b) set `deepseek-official` credentials in
+`~/.dsh/profiles/headless/settings.yaml` *and* ensure the default model
+supports tool calling.
 
 ### Known limitations
 

@@ -157,7 +157,7 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 ### 0.3.0 — Tool call frames in spawn path
 
 > **稳定版（2026-09-28，npm `latest`）**：当 LLM 触发工具调用时，工具调用帧自动
-> 出现。无需配置，安装 dsh 0.1.7-rc.1+ 即自动生效。
+> 出现。需要在代理选择器里选一个 tool-capable 的模型；adapter 本身无需任何配置。
 
 **What you get**
 
@@ -253,14 +253,18 @@ node dsh-acp.mjs            # 在 stdin/stdout 上提供 ACP v1 服务
 
 ### 首次使用
 
-第一次发 prompt 之前，请先在代理选择器（Session 面板）里选一个模型。
+第一次发 prompt 之前，请在代理选择器（Session 面板）里选一个 **tool-capable 且
+已配 API key** 的模型（例如 `gemini-2.5-pro`）。
 
-**原因**：如果没选模型，spawn 路径会 fallback 到 headless profile 的默认值
-（`deepseek-official/deepseek-v4-flash`）。如果你没配 DeepSeek 官方 API key，
-第一条 prompt 就会报 `AUTH: Authentication Fails`。
+**原因**：工具调用帧只会在选用的模型支持 tool/function calling 时出现。如果没
+选模型，spawn 路径会 fallback 到 headless profile 的默认值
+（`deepseek-official/deepseek-v4-flash`）。如果该默认值不支持工具调用，或你没
+配 DeepSeek 官方 API key，第一条 prompt 就会报 `AUTH: Authentication Fails`，
+或者工具调用完全不出现。
 
-**修复**：要么 (a) 在 session 面板先选好已配置的模型再发 prompt，要么 (b) 在
-`~/.dsh/profiles/headless/settings.yaml` 里给 `deepseek-official` 配上凭据。
+**修复**：要么 (a) 在 session 面板先选好 tool-capable 且已配 key 的模型再发
+prompt，要么 (b) 在 `~/.dsh/profiles/headless/settings.yaml` 里给
+`deepseek-official` 配上凭据**并**确认默认模型支持 tool calling。
 
 ### 已知限制
 
