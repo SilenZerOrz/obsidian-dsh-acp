@@ -266,6 +266,19 @@ node dsh-acp.mjs            # 在 stdin/stdout 上提供 ACP v1 服务
 **修复**：要么 (a) 在 session 面板先选好已配置的模型再发 prompt，要么 (b) 在
 `~/.dsh/profiles/headless/settings.yaml` 里给 `deepseek-official` 配上凭据。
 
+### 已知限制
+
+0.3.0 用的是 **Path A**（spawn 路径 + `--json`）来产出工具调用帧，**不**走
+dsh 官方桥。因此：
+
+- **无审批弹窗**：bash / 写文件等工具直接执行，不弹审批框。延续 v0.2.x 行为，
+  只是工具帧从无到有。如需审批弹窗，可用 `DSH_ACP_PERMISSION_MODE`（仅对
+  dsh long-runtime 路径生效），或等官方桥支持（需 dsh 上游修复）。
+- **dsh web profile 不支持官方桥**：即使你设 `DSH_ACP_USE_OFFICIAL_BRIDGE=1`，
+  dsh web profile 当前不暴露官方桥所需的 4 个核心 service（`llm` /
+  `sessionPersistence` / `agents` / `sessions`）。Path A 不依赖此功能，单独
+  `dsh-acp.mjs` 二进制即可工作。
+
 ## cordis 插件用法
 
 通过官方插件机制安装进某个 DSH profile（`package.json` 中的 `dsh.bundle` manifest

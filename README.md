@@ -402,6 +402,23 @@ a DeepSeek official API key, you'll see `AUTH: Authentication Fails` on the firs
 **Fix**: either (a) pick your configured model in the session panel before prompting,
 or (b) set `deepseek-official` credentials in `~/.dsh/profiles/headless/settings.yaml`.
 
+### Known limitations
+
+This 0.3.0 release uses **Path A** (spawn path with `--json`) to reproduce
+tool-call frames — it does **not** route through the dsh official bridge. As a
+result:
+
+- **No permission prompts**: bash / file-write / etc. tools run without
+  confirmation dialogs. The v0.2.x behavior continues — only the tool-call
+  visualization changes. If you need permission prompts, use
+  `DSH_ACP_PERMISSION_MODE` (effective only on the dsh long-runtime path) or
+  wait for official-bridge support (requires dsh upstream fixes).
+- **Official bridge unavailable on dsh web profile**: even with
+  `DSH_ACP_USE_OFFICIAL_BRIDGE=1`, the dsh web profile does not currently expose
+  the 4 core services (`llm` / `sessionPersistence` / `agents` / `sessions`)
+  the official bridge requires. Path A does not depend on this — it works
+  on the standalone `dsh-acp.mjs` binary regardless.
+
 ## cordis plugin usage
 
 Install into a DSH profile via the official plugin mechanism (this makes the
