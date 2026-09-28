@@ -459,9 +459,14 @@ function initializeModes() {
 // `extractProvider`. When settings.yaml is missing / has no providers, fall
 // back to an env override (DSH_ACP_MODELS) then a small built-in default list.
 const FALLBACK_MODELS = [
-  { id: process.env.DSH_ACP_DEFAULT_MODEL || "DeepSeek-V4-Flash" },
+  // Default to a tool-capable model so out-of-the-box users (no settings.yaml,
+  // no DSH_ACP_DEFAULT_MODEL) get tool-call frames on the 0.3.0+ spawn path.
+  // DeepSeek-V4-Flash stays in the list as a known non-tool-capable option,
+  // but no longer as the silent default. Override per-host via
+  // DSH_ACP_DEFAULT_MODEL=<provider/model>.
+  { id: process.env.DSH_ACP_DEFAULT_MODEL || "jl-token/gemini-2.5-pro" },
   { id: "Kimi-K2.6" },
-  { id: "gemini-2.5-pro" },
+  { id: "DeepSeek-V4-Flash" },
   { id: "Qwen3.8" },
 ];
 function providerCatalogModels() {
