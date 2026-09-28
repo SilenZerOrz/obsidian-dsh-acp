@@ -40,6 +40,9 @@ import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
 import { validateCwd } from "./lib/cwd-validator.mjs";
+import { hasHeadlessJson } from "./lib/version-detect.mjs";
+import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
+import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
 import {
   probeDshWebGateway,
   forwardPromptViaHttp,
@@ -245,7 +248,17 @@ function modelPatchArgs(model, provider) {
   return { file, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
 }
 
-function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
+function runDsh(prompt, cwd, onChunk, signal, modelOverride, onFrame) {
+  // 0.3.0 工具帧修复 (Path A): when dsh supports `--json`, drive stdout
+  // through createHeadlessParser + createUpdateTranslator and forward each
+  // legacy-shaped session/update to `onFrame`. dsh < 0.1.7-rc.1 lacks the
+  // flag — fall back to plain-text forwarding via `onChunk` so old installs
+  // keep working unchanged. See v2 plan §5.5.
+  //
+  // Env override `DSH_ACP_NO_HEADLESS_JSON=1` forces the plain-text path
+  // even when --json is available (escape hatch for callers who want the
+  // pre-0.3.0 behavior).
+  const useStructured = hasHeadlessJson() && !process.env.DSH_ACP_NO_HEADLESS_JSON;
   return new Promise((resolve, reject) => {
     const args = [...dshBaseArgs(), prompt];
     // When a per-session model is chosen (and differs from the default we
@@ -258,6 +271,11 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
       const { provider, model } = splitModel(modelOverride);
       patchInfo = modelPatchArgs(model, provider);
       args.splice(args.length - 1, 0, "--patch", patchInfo.file);
+    }
+    if (useStructured) {
+      // Splice --json BEFORE the prompt positional arg (consistent with
+      // where --patch is spliced — both flags precede the prompt).
+      args.splice(args.length - 1, 0, "--json");
     }
     const effectiveCwd = cwd || process.cwd();
     // Bug B (2026-09-19, #63): pre-validate cwd so spawn doesn't fail with a
@@ -289,6 +307,49 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
     // StringDecoder so a multi-byte char split across chunk boundaries is not
     // mangled into garbled text when streamed to the ACP client.
     const stdoutDecoder = new StringDecoder("utf8");
+
+    // Structured-output plumbing (only allocated when useStructured). Both
+    // instances are per-prompt — discarding after the close handler matches
+    // the createUpdateTranslator lifecycle contract (no toolCallId cache
+    // leak across turns).
+    let parser = null;
+    let translator = null;
+    let stdoutBuf = ""; // accumulates decoded bytes between newlines
+    if (useStructured) {
+      parser = createHeadlessParser();
+      translator = createUpdateTranslator();
+    }
+
+    function emitFromStructuredLine(line) {
+      if (!parser || !translator) return;
+      const officialFrames = parser.push(line);
+      for (const f of officialFrames) {
+        for (const legacy of translator.translate(f)) {
+          // Mirror text content into `out` so the Promise's resolve() value
+          // matches the plain-text fallback's `out.trim()` — callers that
+          // ignore onFrame still get the assembled text.
+          if (
+            legacy &&
+            legacy.sessionUpdate === "agent_message_chunk" &&
+            legacy.content &&
+            typeof legacy.content.text === "string"
+          ) {
+            out += legacy.content.text;
+          }
+          if (onFrame) {
+            try {
+              onFrame(legacy);
+            } catch (cbErr) {
+              // A throwing onFrame must not abort the spawn pipeline.
+              // Log to stderr (stdout is the ACP JSON-RPC channel — see the
+              // CRITICAL comment at line 627).
+              try { process.stderr.write(`[dsh-acp] onFrame error: ${cbErr?.message ?? cbErr}\n`); } catch {}
+            }
+          }
+        }
+      }
+    }
+
     if (signal) {
       if (signal.aborted) {
         child.kill("SIGTERM");
@@ -301,15 +362,33 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride) {
       }
     }
     child.stdout.on("data", (chunk) => {
-      const text = stdoutDecoder.write(chunk);
-      out += text;
-      if (onChunk) onChunk(text);
+      const decoded = stdoutDecoder.write(chunk);
+      if (!useStructured) {
+        out += decoded;
+        if (onChunk) onChunk(decoded);
+        return;
+      }
+      // Line-buffer and parse JSONL. Track every complete line; the trailing
+      // partial is drained in the close handler.
+      stdoutBuf += decoded;
+      let nlIdx;
+      while ((nlIdx = stdoutBuf.indexOf("\n")) !== -1) {
+        const line = stdoutBuf.slice(0, nlIdx);
+        stdoutBuf = stdoutBuf.slice(nlIdx + 1);
+        emitFromStructuredLine(line);
+      }
     });
     child.stderr.on("data", (chunk) => { err += chunk.toString(); });
     child.on("error", (e) => reject(e));
     child.on("close", (code) => {
       if (patchInfo) patchInfo.cleanup();
       if (cancelled) return reject(new Error("cancelled"));
+      // Drain any trailing non-newline-terminated JSONL line. Empty buffer
+      // (most common — dsh flushes a final `\n`) is a no-op.
+      if (useStructured && stdoutBuf.length > 0) {
+        emitFromStructuredLine(stdoutBuf);
+        stdoutBuf = "";
+      }
       if (code === 0) {
         resolve(out.trim());
       } else {
@@ -842,13 +921,34 @@ function createAgent() {
       // Archive the user turn (function 3: write back to DSH archive).
       try { recordMessage(session.id, "user", promptText); } catch {}
       try {
-        const output = await runDsh(promptText, cwd, (chunk) => {
-          receivedChunks = true;
-          notifyUpdate(ctx.client, params.sessionId, {
-            sessionUpdate: "agent_message_chunk",
-            ...textChunk(messageId, chunk),
-          }).catch((e) => console.log(`notify error: ${e}`));
-        }, ctx.signal, session.model || undefined);
+        // 0.3.0 工具帧修复 (Path A): when dsh supports --json, `runDsh`
+        // emits structured session/update frames via `onFrame`. The text-only
+        // path (onChunk) is the legacy fallback for dsh < 0.1.7-rc.1 — see
+        // v2 plan §5.5. We pass BOTH callbacks: runDsh picks the structured
+        // path and ignores onChunk when --json is available.
+        const output = await runDsh(
+          promptText,
+          cwd,
+          (chunk) => {
+            receivedChunks = true;
+            notifyUpdate(ctx.client, params.sessionId, {
+              sessionUpdate: "agent_message_chunk",
+              ...textChunk(messageId, chunk),
+            }).catch((e) => console.log(`notify error: ${e}`));
+          },
+          ctx.signal,
+          session.model || undefined,
+          (frame) => {
+            // Structured frame from createUpdateTranslator (legacy shape).
+            // Pass through verbatim to the ACP client — the same notifyUpdate
+            // the legacy SSE channel already digests (see acp-tool-translation
+            // spec for the official→legacy mapping this inherits).
+            receivedChunks = true;
+            notifyUpdate(ctx.client, params.sessionId, frame).catch(
+              (e) => console.log(`notify error: ${e}`),
+            );
+          },
+        );
         const finalText = output || "(no output)";
         // Archive the assistant turn.
         try { recordMessage(session.id, "assistant", finalText); } catch {}
