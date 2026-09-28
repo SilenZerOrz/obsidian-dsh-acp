@@ -248,7 +248,7 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 
 | Версия dsh | legacy spawn | P2 long-running | official bridge |
 |---|---|---|---|
-| `0.3.0-rc.1` | ✅ | ✅ | ✅ (env switch, **official-мост beta**; DoD #1 PASS / #2/#3 оставлены на 0.3.0) |
+| `0.3.0` | ✅ | ✅ | ✅ (env switch, **official-мост opt-in требует апстрим dsh**; Path A spawn-путь автономно даёт tool-фреймы, см. Known Limitations ниже) |
 | `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅ (env switch) |
 | `0.1.5-rc.3` | ✅ | ❌ | ✅ (env switch) |
 
@@ -277,7 +277,7 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `lib/llm-event-bridge.mjs` | Класс LLMStreamBridge: ctx.llm.stream() → ACP update (P1.5) |
 | `lib/permission-gate.mjs` | 4-mode permission gate + кэш + таймаут (P2.0) |
 | `lib/settings-provider-catalog.mjs` | Каталог провайдеров + моделей для FE-1 двух-уровневого переключения (v0.2.3) |
-| `lib/client.js` | React-панель dsh web (**в v0.2.1 / 0.3.0-rc.1 по умолчанию скрыта** в npm `files`, упаковывается только в test-ветке `test/p1b-dsh-web-ui`) |
+| `lib/client.js` | React-панель dsh web (**в v0.2.1 / 0.3.0 по умолчанию скрыта** в npm `files`, упаковывается только в test-ветке `test/p1b-dsh-web-ui`) |
 | `web/session-panel.mjs` | Бэкенд dsh web-панели: маршруты `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` |
 | `web/obsidian-import.mjs` | Обнаружение и импорт в один клик сессий Obsidian Agent Client → dsh native-хранилище (SessionHandle, V3) |
 | `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
@@ -289,32 +289,30 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `README.md` | Документация на английском |
 | `README.zh-CN.md` | Документация на китайском |
 
-### 0.3.0-rc.1 — Official-мост beta (тест-версия)
+### 0.3.0 — Tool call frames in spawn path
 
-> **Тест-версия (2026-09-22, npm tag `rc`)**: включите через `DSH_ACP_USE_OFFICIAL_BRIDGE=1`.
-> Маршрутизирует prompt'ы через `dsh.apply()` (официальный DSH ACP-мост) вместо legacy long-runtime.
->
-> **Статус DoD** (проверено `test/http-gateway-official-dod.test.mjs`, реальный Qwen3.8-Flash-Next, 60s timeout):
->
-> | v2 plan §0.3 DoD | Статус |
-> |------------------|--------|
-> | #1 `tool_call_update` (in_progress + completed) | ✅ **PASS** — official-путь подключён к `createUpdateTranslator` (Session A) |
-> | #2 Всплывающее окно `session/request_permission` | ❌ известный пробел — official-роутер пока не подключён к PermissionGate (отложено на 0.3.0) |
-> | #3 Валидация cwd за пределами рабочей директории | ❌ известный пробел — роутер в `ensureSession` хардкодит `process.cwd()` (отложено на 0.3.0) |
->
-> **Полные данные по известным пробелам**: см. `docs/实施计划/0.3.0-rc.1-known-gaps.md` (число кадров, тайминги, план исправлений).
->
-> **Явная установка тест-версии** (без загрязнения стабильной ветки `latest`):
-> `npm install obsidian-dsh-acp@rc`
+> **Стабильный выпуск (2026-09-28, npm `latest`)**: фреймы вызовов инструментов
+> появляются автоматически, когда LLM вызывает инструмент. Без настройки —
+> работает автоматически при установленном dsh 0.1.7-rc.1+.
 
-### Известные ограничения (0.3.0-rc.1)
+**What you get**
 
-**Official-мост требует**, чтобы in-process cordis ctx dsh предоставлял службы `llm`, `agents`, `sessions`, `sessionPersistence`, прежде чем сможет управлять `dsh.apply()`.
+- Карточки вызовов инструментов в Obsidian Agent Client (`in_progress` → `completed`)
+- Состояние вызова инструмента сохраняется между раундами
+- Расход токенов отображается на каждом шаге
+- Работает через автономный бинарник `dsh-acp.mjs` — dsh web / cordis ctx не требуются.
 
-- **Текущие версии dsh на типичном `web`-профиле этого не дают**: `@deepseek-ai/dsh-llm@0.1.6-alpha.1` не регистрирует свой typert-manifest (`parameter codec has no create() factory`), а web-профиль не загружает service-provider'ы. `probeOfficialBridge(ctx)` возвращает `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`.
-- **Поведение fallback**: если вы задали `DSH_ACP_USE_OFFICIAL_BRIDGE=1`, но службы недоступны, адаптер выведет одноразовое предупреждение в stderr и **откатится на legacy long-runtime** — вы получите реальный вывод модели, а не пустой SSE.
-- **Обычные пользователи не затронуты**: без `DSH_ACP_USE_OFFICIAL_BRIDGE` используется обычный legacy spawn (работает и сегодня).
-- **Трекинг апстрима**: https://github.com/deepseek-ai/deepseek-harness/issues (дефект typert-codec dsh-llm + отсутствие service-provider в web-профиле). Когда dsh выпустит исправление, official-мост заработает без изменений адаптера.
+> Проверено на реальной LLM + реальном ACP-клиенте в Obsidian.
+
+### Official bridge (opt-in, status: requires dsh upstream)
+
+> **Статус (2026-09-28)**: код отправлен, но на типичном web-профиле dsh сегодня
+> не работает. Задайте `DSH_ACP_USE_OFFICIAL_BRIDGE=1` чтобы попробовать; если
+> недоступно, адаптер автоматически откатывается на режим по умолчанию.
+
+- **Трекинг апстрима**:
+  [Discussion #7748](https://github.com/deepseek-ai/deepseek-harness/discussions/7748)
+  на `deepseek-ai/deepseek-harness`.
 
 ## Быстрая установка (в один клик)
 

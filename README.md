@@ -78,48 +78,30 @@ Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
 
 `session/resume` and `session/load` reopen an existing stored session.
 
-### 0.3.0-rc.1 — Official bridge beta
+### 0.3.0 — Tool call frames in spawn path
 
-> **Beta release (2026-09-22, npm tag `rc`)**: opt in with
-> `DSH_ACP_USE_OFFICIAL_BRIDGE=1`. Routes prompts through `dsh.apply()` (the
-> official DSH ACP bridge) instead of the legacy long-runtime path.
->
-> **DoD status** (verified by `test/http-gateway-official-dod.test.mjs`, real
-> LLM Qwen3.8-Flash-Next, 60 s timeout):
->
-> | v2 plan §0.3 DoD | Status |
-> |------------------|--------|
-> | #1 `tool_call_update` (in_progress + completed) | ✅ PASS — official path now wires `createUpdateTranslator` (Session A) |
-> | #2 `session/request_permission` popup | ❌ known gap — official router does not yet hang PermissionGate (deferred to 0.3.0) |
-> | #3 cwd 越权 validation | ❌ known gap — router hardcodes `process.cwd()` in `ensureSession` (deferred to 0.3.0) |
->
-> **Known gaps**: see `docs/实施计划/0.3.0-rc.1-known-gaps.md` for full data
-> (real frames counts, fail reasons, repair plan).
->
-> **To install the beta explicitly** (avoid the `latest` stable line):
-> `npm install obsidian-dsh-acp@rc`.
+> **Stable release (2026-09-28, npm tag `latest`)**: tool call frames now appear
+> automatically when an LLM invokes a tool. No configuration required — works
+> automatically when dsh 0.1.7-rc.1+ is installed.
 
-### Known Limitations (0.3.0-rc.1)
+**What you get**
 
-The **official bridge requires** dsh's in-process cordis ctx to expose `llm`,
-`agents`, `sessions`, `sessionPersistence` services before it can drive
-`dsh.apply()`.
+- Tool call cards in Obsidian Agent Client (`in_progress` → `completed` states)
+- Tool call state persists across turns
+- Token usage shown on every step
+- Works via standalone `dsh-acp.mjs` binary — no dsh web / cordis ctx needed.
 
-- **Current dsh releases do NOT satisfy this** on a typical `web` profile:
-  `@deepseek-ai/dsh-llm@0.1.6-alpha.1` fails to register its typert manifest
-  (`parameter codec has no create() factory`), and the web profile does not
-  load the service-provider packages. `probeOfficialBridge(ctx)` reports
-  `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`.
-- **Fallback behavior**: if you set `DSH_ACP_USE_OFFICIAL_BRIDGE=1` but the
-  services are unavailable, the adapter logs a one-shot stderr warning and
-  falls back to the **legacy long-runtime path** — you still get real model
-  output instead of an empty SSE stream.
-- **Default users are unaffected**: leaving `DSH_ACP_USE_OFFICIAL_BRIDGE`
-  unset routes through the normal legacy spawn path, which works today.
-- **Upstream tracking**: https://github.com/deepseek-ai/deepseek-harness/issues
-  (for the dsh-llm typert codec defect + missing web-profile service providers).
-  Once dsh ships a fixed version, the official bridge becomes usable without
-  adapter changes.
+> Verified with real LLM + real ACP client in Obsidian.
+
+### Official bridge (opt-in, status: requires dsh upstream)
+
+> **Status (2026-09-28)**: code is shipped but not usable on a typical dsh
+> web profile today. Set `DSH_ACP_USE_OFFICIAL_BRIDGE=1` to attempt; if
+> unavailable, the adapter falls back to default mode automatically.
+
+- **Upstream tracking**:
+  [Discussion #7748](https://github.com/deepseek-ai/deepseek-harness/discussions/7748)
+  on `deepseek-ai/deepseek-harness`.
 
 ### Session model switching (v0.1.6)
 

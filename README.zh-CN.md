@@ -128,7 +128,7 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
 | dsh 版本 | legacy spawn | P2 长驻 | official 桥 |
 |---|---|---|---|
-| `0.3.0-rc.1` | ✅ | ✅ | ✅（env 开关，**官方桥 beta**；DoD #1 PASS / #2/#3 留 0.3.0） |
+| `0.3.0` | ✅ | ✅ | ✅（env 开关，**官方桥 opt-in 需 dsh 上游**；Path A spawn 路径自含 tool 帧，详见下方 Known Limitations） |
 | `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅（env 开关） |
 | `0.1.5-rc.3` | ✅ | ❌ | ✅（env 开关） |
 
@@ -150,36 +150,32 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器；long 模式 in-process host） |
 | `lib/runtime-switch.mjs` | 双 runtime mode 解析 + 4-mode permission config + tryLongFallbackSpawn |
 | `lib/long-runtime.mjs` | long 模式 LongRuntime class（v0.2.2 占位；P1.5+ 接入 ctx.llm.stream） |
-| `lib/client.js` | dsh web React 面板（**0.2.1 / 0.3.0-rc.1 默认隐藏** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
+| `lib/client.js` | dsh web React 面板（**0.2.1 / 0.3.0 默认隐藏** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
 
-### 0.3.0-rc.1 — Official 桥 beta（测试版）
+### 0.3.0 — Tool call frames in spawn path
 
-> **测试版（2026-09-22，npm tag `rc`）**：用 `DSH_ACP_USE_OFFICIAL_BRIDGE=1` 启用。
-> 把 prompt 路由到 `dsh.apply()`（官方 DSH ACP 桥），不再走 legacy long-runtime。
->
-> **DoD 实测状态**（由 `test/http-gateway-official-dod.test.mjs` 验证，真 Qwen3.8-Flash-Next，60s timeout）：
->
-> | v2 plan §0.3 DoD | 状态 |
-> |------------------|------|
-> | #1 `tool_call_update`（in_progress + completed）| ✅ **PASS** — 官方路径已接 `createUpdateTranslator`（Session A）|
-> | #2 `session/request_permission` 弹窗 | ❌ 已知缺口 — 官方路由器尚未挂 PermissionGate（留 0.3.0）|
-> | #3 cwd 越权校验 | ❌ 已知缺口 — 路由器在 `ensureSession` 里硬编码 `process.cwd()`（留 0.3.0）|
->
-> **已知缺口完整数据**：见 `docs/实施计划/0.3.0-rc.1-known-gaps.md`（含 frames 计数、用时、修复方向）。
->
-> **显式装测试版**（避免污染 `latest` 稳定线）：
-> `npm install obsidian-dsh-acp@rc`
+> **稳定版（2026-09-28，npm `latest`）**：当 LLM 触发工具调用时，工具调用帧自动
+> 出现。无需配置，安装 dsh 0.1.7-rc.1+ 即自动生效。
 
-### 已知限制（0.3.0-rc.1）
+**What you get**
 
-**官方桥要求** dsh 的 in-process cordis ctx 暴露 `llm`、`agents`、`sessions`、`sessionPersistence` 4 个服务，才能驱动 `dsh.apply()`。
+- Obsidian Agent Client 中工具调用卡片（`in_progress` → `completed` 状态）
+- 工具调用状态跨轮保持
+- 每步显示 token 用量
+- 独立 `dsh-acp.mjs` 二进制即可工作 — 无需 dsh web / cordis ctx。
 
-- **当前 dsh 版本在典型 `web` profile 下不满足**：`@deepseek-ai/dsh-llm@0.1.6-alpha.1` 的 typert manifest 注册失败（`parameter codec has no create() factory`），且 web profile 未加载 service-provider 包。`probeOfficialBridge(ctx)` 返回 `servicesReady: false, missingServices: [llm, sessionPersistence, agents, sessions]`。
-- **fallback 行为**：如果你设了 `DSH_ACP_USE_OFFICIAL_BRIDGE=1` 但服务不可用，adapter 会输出一次性 stderr 警告并**回退到 legacy long-runtime 路径**——你仍能拿到真实模型输出，而不是空 SSE 流。
-- **默认用户不受影响**：不设 `DSH_ACP_USE_OFFICIAL_BRIDGE` 走正常 legacy spawn 路径，今天就能用。
-- **上游跟踪**：https://github.com/deepseek-ai/deepseek-harness/issues （dsh-llm typert codec 缺陷 + web profile 缺 service provider）。dsh 修好新版本后，官方桥无需改 adapter 即可用。
+> 在 Obsidian 中用真 LLM + 真 ACP 客户端实测。
+
+### Official bridge (opt-in, status: requires dsh upstream)
+
+> **状态（2026-09-28）**：代码已发，但**当前 dsh web profile 下不可用**。设
+> `DSH_ACP_USE_OFFICIAL_BRIDGE=1` 启用；如不可用，adapter 自动回退默认模式。
+
+- **上游跟踪**：
+  [Discussion #7748](https://github.com/deepseek-ai/deepseek-harness/discussions/7748)
+  （`deepseek-ai/deepseek-harness`）。
 
 ## 一键安装
 
