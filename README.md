@@ -474,12 +474,25 @@ Config (loader-provided):
 
 `dsh --profile headless` needs a default model provider the headless profile
 can resolve. If your global `$DSH_HOME/settings.yaml` pins a web-only provider
-(e.g. `my-web-only-provider`), give the headless profile its own settings:
+(e.g. `my-web-only-provider`), give the headless profile its own settings via
+a **direct** `llm-pi-ai` patch entry (not a separate `settings` file + plugin —
+that plugin name was wrong and providers would never register, see
+[Troubleshooting](#troubleshooting) below):
 
-- `~/.dsh/profiles/headless/settings.yaml` — an `llm-pi-ai` route +
-  `agent-default-model`.
-- `~/.dsh/profiles/headless/cordis.patch.yml` — mount that settings file via a
-  `settings` id override and set `agent-default-model`.
+- `~/.dsh/profiles/headless/cordis.patch.yml` — define an `llm-pi-ai` provider
+  block + set `agent-default-model` to your chosen `provider/model`.
+- `~/.dsh/profiles/headless/package.json` (devDependencies) — `dsh-llm`,
+  `dsh-agent-loop`, `dsh-acp`, `dsh-base`, `dsh-headless` pinned to the same
+  version as your global `dsh` install.
+- `~/.dsh/profiles/headless/pnpm-workspace.yaml` — `overrides:` pinning all
+  `@deepseek-ai/dsh-*` core packages + `allowBuilds:` for native modules
+  (`dsh-subprocess-local`, `@google/genai`, `koffi`, `node-pty`, `protobufjs`).
+
+Verify with `node dsh-acp.mjs doctor` — it now reports **5-layer headless
+profile misconfigurations** (`headless-default-model-broken`,
+`headless-missing-deps`, `headless-workspace-yaml-incomplete`,
+`headless-cordis-plugin-name-wrong`, `headless-redundant-settings-yaml`) with
+one-click copy-pasteable fix commands.
 
 ## License
 

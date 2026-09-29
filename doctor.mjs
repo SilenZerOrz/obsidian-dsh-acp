@@ -126,8 +126,237 @@ export function diagnoseDsh() {
     });
   }
 
-  // 3) 插件版本检查：npm 上是否有更新（可选、不阻塞）
-  //    （由 CLI 侧调用 npm view；此处不自动访问网络）
+  // 3) headless profile 五层检测 — 详见 diagnoseHeadlessProfile()
+  //    仅在 DSH_PROFILE 未覆盖 / 或当前 profile 是 headless 时跑（避免误报 web profile）
+  const profile = process.env.DSH_PROFILE ?? "headless";
+  if (profile === "headless") {
+    issues.push(...diagnoseHeadlessProfile());
+  }
+
+  return issues;
+}
+
+/**
+ * Headless profile 五层根因体检。
+ *
+ * 为什么需要这一层（2026-09-28 教训）：
+ *   dsh-acp.mjs 默认 spawn `dsh --profile headless`。若 headless profile 配置
+ *   残缺，运行期会报 "NO_ADAPTER: no adapter registered for provider ..."，
+ *   表现为 "Obsidian 工具调用无响应 / LLM 输出 XML 文本"。共五层常见根因：
+ *
+ *     层 1  cordis.patch.yml 默认 model 指向已失效 key 路径（deepseek-official/...）
+ *     层 2  headless profile 缺 5 个核心 devDeps（dsh-llm/agent-loop/acp/base/headless）
+ *     层 3  pnpm-workspace.yaml 缺 overrides + allowBuilds（next dist-tag 不解析）
+ *     层 4  cordis.patch.yml plugin name 写错（dsh-settings-file 而非 dsh-llm-pi-ai）
+ *     层 5  冗余 settings.yaml 与 cordis.patch.yml 双重定义 → 配置冲突
+ *
+ * 检测策略：每个文件用字符串模式匹配（不引入 YAML 解析依赖），失败时给出可复制修复命令。
+ * 不做自动修复——配置改动属于一次性且需用户拍板，避免误改。
+ */
+export function diagnoseHeadlessProfile() {
+  const issues = [];
+
+  // 定位 headless profile 目录
+  const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
+  const profileDir = process.env.DSH_ACP_PROFILE_DIR || join(dshHome, "profiles", "headless");
+  const cordisYml = join(profileDir, "cordis.patch.yml");
+  const pkgJson = join(profileDir, "package.json");
+  const wsYaml = join(profileDir, "pnpm-workspace.yaml");
+  const settingsYml = join(profileDir, "settings.yaml");
+
+  if (!existsSync(profileDir)) {
+    // headless profile 完全没装 — 让 dsh-acp 自动跑 install.sh 或用户手动
+    issues.push({
+      kind: "headless-profile-missing",
+      severity: "high",
+      hint: `未找到 headless profile 目录（${profileDir}）。`,
+      fix: [
+        "# 让 dsh-acp 触发安装（首次运行会自动 install + pnpm install）",
+        "node dsh-acp.mjs",
+        "# 或手动（首次）",
+        "mkdir -p ~/.dsh/profiles && cd ~/.dsh/profiles && npm init -y && npm i @deepseek-ai/dsh-base @deepseek-ai/dsh-headless @deepseek-ai/dsh-llm @deepseek-ai/dsh-agent-loop @deepseek-ai/dsh-acp@0.1.7-rc.1",
+      ],
+    });
+    return issues; // 没目录的话下面 4 项无意义
+  }
+
+  // ----- 层 1: cordis.patch.yml 默认 model -----
+  if (existsSync(cordisYml)) {
+    let cordis = "";
+    try { cordis = readFileSync(cordisYml, "utf8"); } catch {}
+    // 已知失效路径：deepseek-official/*（用户报告 key 0700 invalid）
+    if (/provider:\s*deepseek-official/.test(cordis) || /model:\s*deepseek-v4-flash\b/.test(cordis)) {
+      issues.push({
+        kind: "headless-default-model-broken",
+        severity: "high",
+        hint: `cordis.patch.yml 默认 model 指向 deepseek-official（已知 key 失效，0700 invalid）。`,
+        file: cordisYml,
+        fix: [
+          "# 编辑 " + cordisYml,
+          "# 替换 agent-default-model 段：provider 改为 jl-token，model 改为 gemini-2.5-pro",
+          `# 路径示意:`,
+          `- id: agent-default-model`,
+          `  name: '@deepseek-ai/dsh-agent-default-model'`,
+          `  config:`,
+          `    provider: jl-token`,
+          `    model: gemini-2.5-pro`,
+          ``,
+          "# 配 llm-pi-ai 段（若尚未配置）：",
+          `# 参考 ~/.dsh/profiles/web/cordis.patch.yml 的 llm-pi-ai 段复制。`,
+        ],
+      });
+    }
+  } else {
+    issues.push({
+      kind: "headless-cordis-patch-missing",
+      severity: "high",
+      hint: `headless profile 缺 cordis.patch.yml（${cordisYml}）。`,
+      file: cordisYml,
+      fix: [
+        "# 从 web profile 复制参考配置",
+        "cp ~/.dsh/profiles/web/cordis.patch.yml " + cordisYml,
+        "# 或参考 docs/README.md 的 'Headless profile setup' 段手写",
+      ],
+    });
+  }
+
+  // ----- 层 2: package.json 缺核心 devDeps -----
+  if (existsSync(pkgJson)) {
+    let pkg = null;
+    try { pkg = JSON.parse(readFileSync(pkgJson, "utf8")); } catch {}
+    const deps = { ...(pkg?.devDependencies ?? {}), ...(pkg?.dependencies ?? {}) };
+    const required = [
+      "@deepseek-ai/dsh-llm",
+      "@deepseek-ai/dsh-agent-loop",
+      "@deepseek-ai/dsh-acp",
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-headless",
+    ];
+    const missing = required.filter((n) => !deps[n]);
+    if (missing.length) {
+      issues.push({
+        kind: "headless-missing-deps",
+        severity: "high",
+        hint: `headless profile 缺 ${missing.length} 个核心 devDeps：${missing.join("、")}。`,
+        file: pkgJson,
+        fix: [
+          "# 进 headless profile 目录",
+          `cd ${profileDir}`,
+          "# 装齐 5 个核心包（pin 到当前 dsh 版本，避免 next dist-tag 解析失败）",
+          `pnpm add -D ${required.join("@0.1.7-rc.1 ")}@0.1.7-rc.1`,
+          "# 不锁版本也可，但 pnpm 解析 0.1.7-rc.1 时仍需要 overrides 段（见下一项）",
+        ],
+      });
+    }
+  } else {
+    issues.push({
+      kind: "headless-package-json-missing",
+      severity: "high",
+      hint: `headless profile 缺 package.json（${pkgJson}）。`,
+      file: pkgJson,
+      fix: [
+        `cd ${profileDir}`,
+        "npm init -y",
+        `pnpm add -D @deepseek-ai/dsh-base @deepseek-ai/dsh-headless @deepseek-ai/dsh-llm @deepseek-ai/dsh-agent-loop @deepseek-ai/dsh-acp@0.1.7-rc.1`,
+      ],
+    });
+  }
+
+  // ----- 层 3: pnpm-workspace.yaml 缺 overrides + allowBuilds -----
+  if (existsSync(wsYaml)) {
+    let ws = "";
+    try { ws = readFileSync(wsYaml, "utf8"); } catch {}
+    const hasOverrides = /^overrides:/m.test(ws);
+    const hasAllowBuilds = /^allowBuilds:/m.test(ws);
+    if (!hasOverrides || !hasAllowBuilds) {
+      issues.push({
+        kind: "headless-workspace-yaml-incomplete",
+        severity: "high",
+        hint: `pnpm-workspace.yaml 缺 ${!hasOverrides ? "overrides" : ""}${!hasOverrides && !hasAllowBuilds ? " + " : ""}${!hasAllowBuilds ? "allowBuilds" : ""} 段。`,
+        file: wsYaml,
+        fix: [
+          "# 从 web profile 复制（已配齐 22 overrides + 5 allowBuilds）",
+          `cp ~/.dsh/profiles/web/pnpm-workspace.yaml ${wsYaml}`,
+          "# 然后保留 headless 自己的 packages/ 段，叠加 web 的 overrides + allowBuilds",
+          "# 关键 allowBuilds: dsh-subprocess-local, @google/genai, koffi, node-pty, protobufjs",
+        ],
+      });
+    }
+  } else {
+    issues.push({
+      kind: "headless-workspace-yaml-missing",
+      severity: "high",
+      hint: `headless profile 缺 pnpm-workspace.yaml（${wsYaml}）。`,
+      file: wsYaml,
+      fix: [
+        "# 关键段：packages: ['.'], nodeLinker: hoisted, autoInstallPeers: false",
+        "# + 22 个 @deepseek-ai/dsh-* overrides (pin 到 0.1.7-rc.1)",
+        "# + 5 个 allowBuilds (dsh-subprocess-local, @google/genai, koffi, node-pty, protobufjs)",
+        "# 参考 ~/.dsh/profiles/web/pnpm-workspace.yaml 全文复制",
+      ],
+    });
+  }
+
+  // ----- 层 4: cordis.patch.yml plugin name 错 -----
+  if (existsSync(cordisYml)) {
+    let cordis = "";
+    try { cordis = readFileSync(cordisYml, "utf8"); } catch {}
+    // 已知错名：@deepseek-ai/dsh-settings-file（已废弃，应直接挂 llm-pi-ai）
+    if (/@deepseek-ai\/dsh-settings-file/.test(cordis)) {
+      issues.push({
+        kind: "headless-cordis-plugin-name-wrong",
+        severity: "high",
+        hint: `cordis.patch.yml plugin name 写错：使用 @deepseek-ai/dsh-settings-file（应 @deepseek-ai/dsh-llm-pi-ai）。`,
+        file: cordisYml,
+        fix: [
+          "# 编辑 " + cordisYml,
+          "# 删 settings 段（- id: settings / name: @deepseek-ai/dsh-settings-file）",
+          "# 改为 llm-pi-ai 段（id + name + providers.jl-token.apiKeyEnv/api/baseURL/models）",
+          "# 完整模板参考 ~/.dsh/profiles/web/cordis.patch.yml llm-pi-ai 段",
+        ],
+      });
+    }
+    // 另一个常见错：用 'settings' id 而非 'llm-pi-ai' id
+    if (/^\s*-\s+id:\s*settings\b/m.test(cordis) && !/^\s*-\s+id:\s*llm-pi-ai\b/m.test(cordis)) {
+      issues.push({
+        kind: "headless-cordis-llm-pi-ai-missing",
+        severity: "high",
+        hint: `cordis.patch.yml 缺 llm-pi-ai 段（providers 不会注册 → NO_ADAPTER）。`,
+        file: cordisYml,
+        fix: [
+          "# 加 llm-pi-ai 段（参考 web 的写法）",
+          `- id: llm-pi-ai`,
+          `  name: "@deepseek-ai/dsh-llm-pi-ai"`,
+          `  config:`,
+          `    providers:`,
+          `      jl-token:`,
+          `        displayName: jl-token`,
+          `        apiKeyEnv: JL_TOKEN_API_KEY`,
+          `        api: openai-completions`,
+          `        baseURL: http://cdn.shenkeinfo.net/v1`,
+          `        models:`,
+          `          - id: gemini-2.5-pro`,
+          `            name: gemini-2.5-pro`,
+        ],
+      });
+    }
+  }
+
+  // ----- 层 5: 冗余 settings.yaml -----
+  if (existsSync(settingsYml)) {
+    issues.push({
+      kind: "headless-redundant-settings-yaml",
+      severity: "medium",
+      hint: `settings.yaml 存在且与 cordis.patch.yml 双重定义 providers，配置会冲突。`,
+      file: settingsYml,
+      fix: [
+        "# 删冗余文件（providers 已在 cordis.patch.yml llm-pi-ai 段配置）",
+        `rm ${settingsYml}`,
+        "# 备份到 .bak 留个引用",
+        `mv ${settingsYml} ${settingsYml}.bak`,
+      ],
+    });
+  }
 
   return issues;
 }
