@@ -1196,7 +1196,32 @@ function nodeToWebReadable(nodeStream) {
 //   dsh-acp doctor [--auto] [--gc]            健康诊断 + 修复指引
 //   dsh-acp import <file> [--title][--cwd]    导入外部 ACP (claude) 会话
 //   dsh-acp manage <list|export|archive|move|import> ...  会话管理
-if (process.argv[2] === "doctor") {
+if (process.argv[2] === "--help" || process.argv[2] === "-h") {
+  console.log(`dsh-acp — ACP adapter for DeepSeek Harness
+
+Usage:
+  dsh-acp                       Start ACP server (default: dual-mode spawn/long)
+  dsh-acp doctor [--auto]       Health diagnosis + copy-pasteable fix guidance
+  dsh-acp import <file>         Import external ACP (claude) session
+  dsh-acp manage <verb> ...     Session management (list/export/archive/move/import)
+  dsh-acp --help | -h           Show this help
+
+Subcommand details:
+  doctor [--auto] [--gc]
+      Run 5-layer headless profile check; --auto applies safe fixes, --gc reclaims
+      orphan session files.
+  import <file> [--title=<t>] [--cwd=<dir>]
+      Import an ACP session JSON file into the local session store.
+  manage <list|export|archive|move|import> ...
+      Operate on the local session store (see 'dsh-acp manage list' for ids).
+
+Environment:
+  DSH_ACP_PROXY_MODE    "true" routes through dsh web HTTP gateway (default),
+                        "false" forces direct spawn of 'dsh --profile headless --json'.
+  DSH_ACP_PROFILE_DIR   Override headless profile location (default ~/.dsh/profiles/headless).
+`);
+  process.exit(0);
+} else if (process.argv[2] === "doctor") {
   const { runDoctorCli } = await import("./doctor.mjs");
   await runDoctorCli(process.argv.slice(3));
 } else if (process.argv[2] === "import") {
