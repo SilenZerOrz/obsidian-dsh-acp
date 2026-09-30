@@ -286,6 +286,7 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `import-session.mjs` | Импорт внешней ACP-сессии (v0.1.6) |
 | `session-manage.mjs` | Ядро управления сессиями P1b (export / archive / move workspace / list) |
 | `install.sh` | Установщик в один клик (профиль DSH + custom agent Obsidian) |
+| `install.ps1` | Установщик в один клик для Windows (версия install.sh на PowerShell; разделяет `-PluginProfile` / `-RuntimeProfile`, записывает `DSH_BIN=<dsh.cmd>`) |
 | `README.md` | Документация на английском |
 | `README.zh-CN.md` | Документация на китайском |
 
@@ -351,6 +352,23 @@ custom agent для плагина **Agent Client** в Obsidian, с опцион
 | `--no-obsidian` | Пропустить шаг настройки Obsidian |
 | `--dry-run` | Только предпросмотр, ничего не изменяет |
 | `--uninstall` | Восстановить резервные копии, удалить DSH-плагин (`dsh plugin remove`) и конфигурацию Obsidian, добавленные этим скриптом |
+
+**Windows**: используйте версию для PowerShell — `install.ps1`. Она разделяет
+«профиль-цель плагина» (`-PluginProfile`, по умолчанию `web`) и «профиль среды
+адаптера» (`-RuntimeProfile`, по умолчанию `headless`) — их смешение как раз и
+является причиной, по которой `DSH_PROFILE=web` не может выполнять одноразовые
+запросы (web-приложение не принимает позиционный аргумент prompt). Скрипт также
+записывает `DSH_BIN=<абсолютный путь к dsh.cmd>` в env custom agent (Node не может
+напрямую запускать npm-шим; адаптер разбирает cmd-shim и запускает его через node),
+устанавливает `nodePath` / `command=node.exe + args=[adapter]` и не пишет PATH
+(Agent Client объединяет env с родительским процессом).
+
+```powershell
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -DryRun     # предпросмотр
+.\install.ps1 -ObsidianVault 'D:\path\to\vault'             # установка
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -SkipPlugin # только переключить Obsidian
+.\install.ps1 -Uninstall -ObsidianVault 'D:\path\to\vault'  # откат
+```
 
 ## Автономное использование
 

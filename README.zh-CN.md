@@ -153,6 +153,7 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `lib/client.js` | dsh web React 面板（**0.2.1 / 0.3.0 默认隐藏** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
+| `install.ps1` | Windows 一键安装脚本（install.sh 的 PowerShell 版；分离 `-PluginProfile` / `-RuntimeProfile`，写入 `DSH_BIN=<dsh.cmd>`） |
 
 ### 0.3.0 — Tool call frames in spawn path
 
@@ -211,6 +212,21 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `--no-obsidian` | 跳过 Obsidian 配置步骤 |
 | `--dry-run` | 只预演，不做任何改动 |
 | `--uninstall` | 恢复备份 + 卸载 DSH profile 插件（`dsh plugin remove`）+ 移除 Obsidian 本脚本添加的配置 |
+
+**Windows**：请改用 PowerShell 版本 `install.ps1`。它把「插件安装目标 profile」
+（`-PluginProfile`，默认 `web`）与「适配器运行时 profile」（`-RuntimeProfile`，默认
+`headless`）分离——两者混用正是 `DSH_PROFILE=web` 无法跑一次性 prompt 的原因
+（web app 不接受位置参数 prompt）。它同时把 `DSH_BIN=<dsh.cmd 绝对路径>` 写进
+custom agent 的 env（Node 无法直接 spawn npm 垫片；适配器会解析 cmd-shim 后经
+node 拉起），设置 `nodePath` / `command=node.exe + args=[adapter]`，且不写 PATH
+（Agent Client 会与父进程 env 合并）。
+
+```powershell
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -DryRun     # 预演
+.\install.ps1 -ObsidianVault 'D:\path\to\vault'             # 安装
+.\install.ps1 -ObsidianVault 'D:\path\to\vault' -SkipPlugin # 只重配 Obsidian
+.\install.ps1 -Uninstall -ObsidianVault 'D:\path\to\vault'  # 还原
+```
 
 ## 独立使用
 
