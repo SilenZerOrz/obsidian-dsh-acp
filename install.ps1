@@ -32,9 +32,9 @@
 # ============================================================================
 [CmdletBinding()]
 param(
-  [string]$PluginProfile = ($env:DSH_ACP_PROFILE ?? "web"),
+  [string]$PluginProfile = "",
   [string]$RuntimeProfile = "headless",
-  [string]$DshHome = ($env:DSH_HOME ?? (Join-Path $env:USERPROFILE ".dsh")),
+  [string]$DshHome = "",
   [string]$ObsidianVault = "",
   [string]$Package = "",
   [string]$NodeBin = "",
@@ -44,6 +44,16 @@ param(
   [switch]$DryRun,
   [switch]$Uninstall
 )
+
+# PS 5.1 compatibility: `??` (null-coalescing) is PowerShell 7+ only and is not
+# valid in a param() default on the Windows default powershell.exe (5.1). Resolve
+# env-var fallbacks here instead, after the trap the param block cannot express.
+if (-not $PluginProfile) {
+  $PluginProfile = if ($env:DSH_ACP_PROFILE) { $env:DSH_ACP_PROFILE } else { "web" }
+}
+if (-not $DshHome) {
+  $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE ".dsh" }
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -149,10 +159,21 @@ if (-not $DshCmd -and (Test-Path (Join-Path $DshHome "bin\dsh.cmd") -PathType Le
 if (-not $DshCmd) {
   Write-Warn2 "dsh not found on PATH; DSH plugin step will be skipped (Obsidian wiring still attempted)."
 }
-# 只有当解析结果是可被适配器消化的形态（.cmd 垫片 / .exe）时才写入 DSH_BIN
+# 只有当解析结果是可被适配器消化的形态（.cmd 垫片 / .exe）时才写入 DSH_BIN。
+# .cmd 额外校验：必须含被引号包住的 .js 入口（仿 doctor.mjs parseCmdShimEntry），
+# 否则适配器 resolveDshSpawnSpec 解析失败 → 原样 spawn .cmd → Node≥18.20 EINVAL。
+# 手写转发壳（无 .js 入口）就属于这种，安装期拦下比运行期 EINVAL 好。
 $DshBinForEnv = ""
-if ($DshCmd -and ($DshCmd -like "*.cmd" -or $DshCmd -like "*.exe")) { $DshBinForEnv = $DshCmd }
-elseif ($DshCmd) {
+if ($DshCmd -and ($DshCmd -like "*.exe")) {
+  $DshBinForEnv = $DshCmd
+} elseif ($DshCmd -and ($DshCmd -like "*.cmd")) {
+  $shimContent = Get-Content -LiteralPath $DshCmd -Raw -ErrorAction SilentlyContinue
+  if ($shimContent -and $shimContent -match '"([^"]+\.js)"') {
+    $DshBinForEnv = $DshCmd
+  } else {
+    Write-Warn2 "dsh shim '$DshCmd' has no quoted .js entry; DSH_BIN will be omitted (adapter will fall back to a PATH scan for dsh.cmd)."
+  }
+} elseif ($DshCmd) {
   Write-Warn2 "dsh resolved to '$DshCmd' (not .cmd/.exe); DSH_BIN env will be omitted (adapter PATH scan will try dsh.cmd)."
 }
 Write-Vlog "dsh: $DshCmd"
