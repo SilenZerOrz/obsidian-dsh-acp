@@ -37,6 +37,7 @@
     "web/",
     "cordis.patch.yml",
     "install.sh",
+    "install.ps1",
     "README.md",
     "LICENSE"
   ],
