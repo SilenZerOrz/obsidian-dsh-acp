@@ -49,6 +49,57 @@ Obsidian Agent Client ──(ACP JSON-RPC over stdin/stdout)──▶ dsh-acp �
   `result` (`stopReason: "end_turn"`).
 - `cwd` is honored; a persistent session layer makes session management usable.
 
+## Dual-runtime architecture
+
+To bring **tool approval dialogs** and **live reasoning / execution display** to
+the Obsidian side, the adapter switches from "spawn a headless subprocess per
+turn" to **dual-runtime dispatch**:
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  Entry A: dsh-acp.mjs standalone binary                          │
+│           (launched by Obsidian Agent Client)                    │
+│  · No cordis ctx, runtime.mode always = "spawn" (back-compat)    │
+│  · Uses the existing spawn path: spawn dsh --profile headless    │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Entry B: index.mjs cordis plugin (loaded by dsh web)            │
+│  · Same process as dsh; runtime.mode defaults to "long"           │
+│  · long mode: in-process import lib/long-runtime.mjs             │
+│  · Subscribes to ctx.llm.stream() chunks → ACP sessionUpdate     │
+│  · headless profile automatically falls back to spawn            │
+│    (protects existing headless users)                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Current state (0.3.3)**: long mode is implemented end-to-end inside the cordis
+plugin in-process. The P2 long-running pieces (LLM stream → ACP `sessionUpdate`,
+4-mode approval, two-tier model switching, and temperature / reasoningEffort
+toggles) are all wired in. The spawn path is unchanged at 100%.
+
+**Mode resolution precedence** (`lib/runtime-switch.mjs::resolveRuntimeMode()`):
+
+1. `DSH_PROFILE=headless` → force spawn (headless users unaffected)
+2. `DSH_ACP_RUNTIME_MODE=long|spawn` explicit override
+3. `DSH_IN_CORDIS=1` → long (cordis plugin in-process marker)
+4. Default spawn (standalone binary back-compat)
+
+Configuration examples:
+
+```bash
+# force long mode (inside cordis plugin)
+DSH_ACP_RUNTIME_MODE=long node dsh-acp.mjs
+
+# fall back to spawn if long initialization fails (default enabled)
+DSH_ACP_SPAWN_FALLBACK=true DSH_ACP_RUNTIME_MODE=long node dsh-acp.mjs
+
+# 4 permission modes (default "default" — safest)
+DSH_ACP_PERMISSION_MODE=acceptEdits    # or dontAsk / bypassPermissions
+DSH_ACP_PERMISSION_TIMEOUT_MS=300000   # 5min timeout auto-reject
+DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
+```
+
 ## Session features
 
 Beyond the stateless per-turn model, `dsh-acp` adds a persistent session layer
@@ -216,6 +267,13 @@ Three screenshots of the plugin in action inside Obsidian Agent Client:
 
 ## dsh version support
 
+> **Peer range must carry explicit prerelease branches.** `node-semver` only lets a prerelease build satisfy a range when some comparator in that range shares its exact `major.minor.patch` tuple *and* itself carries a prerelease tag. So a range that merely looks broad (e.g. `>=0.1.6-alpha.1 <0.3.0-0`) silently excludes every `0.2.x` prerelease host — including our two real anchors. The declared range therefore enumerates them:
+>
+> `>=0.1.6-alpha.1 <0.3.0-0 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.1`
+>
+> (Source of truth: `package.json` → `peerDependencies["@deepseek-ai/dsh-acp"]`; declared `optional` via `peerDependenciesMeta`. The rule is also documented upstream in awesome-dsh-plugin `contributing.md`.)
+
+
 | dsh version | legacy spawn | P2 long-running | official bridge |
 |---|---|---|---|
 | `0.1.6-alpha.x` / `0.1.7+` | ✅ | ✅ | ✅ (env switch) |
@@ -233,6 +291,18 @@ This is a **conservative gate, not a bug**: the rc line does ship the
 subpackages, but long-running mode has not been validated against it, so the
 adapter deliberately falls back to the spawn path rather than risk
 `ERR_MODULE_NOT_FOUND` at import time.
+
+**Peer range (this 0.3.3 release).** The plugin declares its peer dependency as
+the explicit union
+`>=0.1.6-alpha.1 <0.3.0-0 || <prerelease branch A> || <prerelease branch B> || <prerelease branch C>`
+(see `peerDependencies` / `peerDependenciesMeta` of `@deepseek-ai/dsh-acp` in
+`package.json` for the canonical string — the trailing `||` clauses enumerate
+the in-flight prerelease lines of dsh that this release is validated against).
+Per the node-semver rule documented in `awesome-dsh-plugin`'s contributing
+guide, **a peer range that does not name each prerelease line explicitly
+silently excludes every prerelease host version** — so the explicit `||`
+clauses above are exactly what makes this plugin installable against current
+prerelease builds of dsh rather than silently rejecting them.
 
 ## Files
 
@@ -322,7 +392,8 @@ a standalone health check:
 
 ```bash
 node dsh-acp.mjs doctor            # diagnose + print one-click fix commands
-node dsh-acp.mjs doctor --auto     # attempt auto-fix (each step asks for confirmation first)
+node dsh-acp.mjs doctor --auto              # PREVIEW the fix plan (writes nothing)
+node dsh-acp.mjs doctor --auto --apply      # execute user-authorized items only (manual ones are never auto-applied)
 ```
 
 `doctor` is **version-agnostic** — it works with both `0.1.1-rc.2` and

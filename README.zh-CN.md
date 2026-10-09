@@ -46,7 +46,7 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
   （`stopReason: "end_turn"`）。
 - 会话无状态（每一回合相互独立）；`cwd` 会被保持。
 
-## 双 runtime 架构（v0.2.2+ / P2 长驻改造骨架）
+## 双 runtime 架构（P2 长驻改造骨架）
 
 为了在 Obsidian 端实现**工具审批弹窗**和**思考/执行过程实时显示**，adapter
 需要从「每轮 spawn headless 子进程」切换到「**双 runtime 分发**」：
@@ -55,7 +55,7 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 ┌─────────────────────────────────────────────────────────────────┐
 │  入口 A：dsh-acp.mjs 独立二进制（Obsidian Agent Client 拉起）       │
 │  · 无 cordis ctx，runtime.mode 永远 = "spawn"（向后兼容）          │
-│  · 走 v0.2.1 现有路径：spawn dsh --profile headless               │
+│  · 走现有 spawn 路径：spawn dsh --profile headless                 │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -67,10 +67,10 @@ Obsidian Agent Client ──(基于 stdin/stdout 的 ACP JSON-RPC)──▶ dsh-
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**当前状态（v0.2.2 / P1.0 骨架）**：long 模式已可被 cordis 插件在
-in-process 启动，但接入点先 throw P1.0 placeholder，等待 P1.5 接入
-`ctx.llm.stream()`、P2.0 接入 4-mode 审批、P2.5 接入 temperature / reasoningEffort。
-spawn 路径 100% 不变。
+**当前状态（0.3.3）**：long 模式已由 cordis 插件在 in-process 启动并端到端实现：
+LLM 流（`ctx.llm.stream()` → ACP `sessionUpdate`）、4-mode 审批
+（`DSH_ACP_PERMISSION_MODE`）、双层模型切换以及 temperature / reasoningEffort 均
+接入并可用。spawn 路径 100% 不变。
 
 **模式解析优先级**（`lib/runtime-switch.mjs::resolveRuntimeMode()`）：
 
@@ -119,12 +119,82 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 
 > **持久化与并发（v0.1.4）**：内存索引按短防抖（`DSH_ACP_PERSIST_DEBOUNCE_MS`）落盘并在退出前 flush，突发消息合并为少量磁盘写；多个适配器进程共享同一 store 时，写前先合并磁盘副本、且绝不复活已删除记录。完整 REQ 变更见 `docs/计划/开发现状.md`。
 
+### 会话级模型切换 (v0.1.6)
+
+每个会话都可以自带模型。适配器在 `session/new` / `session/load` / `session/resume`
+上声明 `model` 这个 session config option（`SessionConfigSelect`），Obsidian 等
+客户端就能给出模型下拉（机制同 claude）。`session/set_config_option` 把所选模型写
+到该会话记录上；下一次 `prompt` 时，适配器会用
+`dsh --profile headless --patch <disposable model overlay>` 启动，仅这一次调用
+用所选模型——共享 profile 设置永远不会被改写。
+
+可用模型默认来自 headless 目录（`DeepSeek-V4-Flash`、`Kimi-K2.6`、
+`gemini-2.5-pro`、`Qwen3.8`），可通过 `DSH_ACP_MODELS`（逗号分隔 `id(display)`
+对）和 `DSH_ACP_DEFAULT_MODEL` 覆盖。
+
+### 会话摘要预览 (v0.1.6)
+
+每轮交换结束后，`dsh-acp` 让模型用 **一行**（用对话所在语言）写出对话摘要，
+并写回会话记录（`summary` / `summaryAt`）。`session/list` 在
+`_meta.summary` / `_meta.summaryAt` 下把它返回给客户端，使「Session history」
+面板能预览每条历史会话的主旨。摘要会在累积若干新消息后（带防抖）重新生成；
+无需关闭摘要生成——它是 best-effort，绝不会阻塞响应。
+
+### 导入外部 ACP 会话 (v0.1.6)
+
+把另一个 ACP agent（如 claude / Obsidian Agent Client）导出的会话，导入到
+dsh-acp 自己的 store：
+
+```sh
+node dsh-acp.mjs import <session.json> [--title '..'] [--cwd /path]
+# 或在 Obsidian dsh-acp 会话内发送命令：
+#   /import /path/to/claude-session.json
+```
+
+既接受 `claude-agent-acp` 格式
+（`{ sessionId, messages:[{id,role,content,timestamp}] }`），也接受 dsh-acp 自身
+的记录格式；只保留 `user` / `assistant` 轮，写进一个新的持久会话（含 DSH
+归档）。导入后，客户端的会话列表里就会出现该会话。
+
+### DSH web 会话面板与 Obsidian 原生导入（本地，P1b）
+
+除仅服务 Obsidian 的适配器外，本包还附带一个 **dsh web 会话管理面板**
+（cordis web 插件，默认 `enableWebPanel: true`）以及 **一键把会话写入
+DSH 原生 store**（在 dsh 左侧对话列表可见、可恢复、共享工具/preset）的
+Obsidian 导入功能。它沿用与 `dsh-chat-import` 相同的插件面。
+
+- **面板**（`lib/client.js`、`web/session-panel.mjs`）：侧边栏
+  `sidebar.footer.action` 按钮打开一个滑出面板，含三个 tab —— **Sessions**
+  （自有 `~/.dsh-acp` store：list / export / archive / move）、**DSH Native**
+  （通过 `sessionPersistence` 列出 dsh 的会话存储）以及 **Obsidian Import**（发现
+  并一键导入 Obsidian Agent Client 的会话）。
+- **DSH 原生集成**（`web/obsidian-import.mjs`）：在你的 vault 中发现
+  Obsidian `agent-client/sessions/*.json`（可用 `DSH_ACP_OBSIDIAN_DIRS` 覆盖），
+  并把每个文件导入 **dsh 原生会话存储** —— 通过 `sessionPersistence`
+  （SessionHandle：`create(header)` → `append` → `flush` → `close`）写入，
+  拼装出 DSH 的 `session` 事件（`assistant/message` 携带结算 `stream`），
+  并挂到一个 workspace，使该会话出现在 dsh 的对话列表中且可被恢复。
+- **兼容 dsh 0.1.5**：会话格式 V3（`SESSION_FORMAT_VERSION = 3`）、
+  `sessionPersistence` 的 SessionHandle 模型、读 / 预览走
+  `sp.open('read').read()`、以及归一化的快照 `sp.list()`。
+- 在 `/api-session/*` 下注册的 HTTP 路由：`list`、`export`、`archive`、`move`、
+  `dsh-list`、`dsh-read`、`obsidian-list`、`obsidian-import`。面板端点通过
+  `ctx.get('sessionPersistence' | 'agents' | 'sessionProjectionCache' | ...)`
+  读取 dsh host 服务；不可用 → 503；老 `~/.dsh-acp` 路由仍可用。
+
 ## 环境要求
 
 - Node.js >= 22.13
 - 可正常启动的 `dsh` 后端（参见 [Headless profile 引导](#headless-profile-引导)）
 
 ## dsh 版本支持
+
+> **peer 区间必须带显式预发布分支。** `node-semver` 只有当范围里*某个*比较符与该版本的 `major.minor.patch` 元组完全一致、且自身也带预发布标签时，才会放行预发布版本。因此一个「看起来够宽」的范围（如 `>=0.1.6-alpha.1 <0.3.0-0`）会**静默排除所有 `0.2.x` 预发布宿主**——包括我们两个真实锚点。故本插件声明的区间把它们显式并列：
+>
+> `>=0.1.6-alpha.1 <0.3.0-0 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.1`
+>
+> （单一真值源：`package.json` → `peerDependencies["@deepseek-ai/dsh-acp"]`；经 `peerDependenciesMeta` 标为 `optional`。该规则上游 awesome-dsh-plugin `contributing.md` 亦有明载。）
+
 
 | dsh 版本 | legacy spawn | P2 长驻 | official 桥 |
 |---|---|---|---|
@@ -141,6 +211,14 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 这是**保守门禁，不是 bug**：rc 线实际含这些子包，但长驻模式尚未在 rc.3 上验证，
 适配器宁可回退 spawn 路径，也不冒 import 时 `ERR_MODULE_NOT_FOUND` 的风险。
 
+**Peer 区间（0.3.3 发行版）。** 插件把 `@deepseek-ai/dsh-acp` 的 peer 声明为显式
+并列形式 `>=0.1.6-alpha.1 <0.3.0-0 || <预发布线 A> || <预发布线 B> || <预发布线 C>`
+（权威字符串见 `package.json` 的 `peerDependencies` / `peerDependenciesMeta` —
+末尾那几条 `||` 列出本次发版所实测过的 dsh 在途预发布线）。
+依据 `awesome-dsh-plugin` contributing 指南里写的 node-semver 规则：
+**没有显式列出每条预发布线的 peer 范围会静默排除所有预发布宿主版本** —— 因此上
+面的 `||` 段是让插件能装上当前 dsh 预发布构建、而不是被静默拒绝的关键。
+
 ## 文件
 
 | 路径 | 作用 |
@@ -149,8 +227,8 @@ DSH_ACP_PERMISSION_EDIT_TOOLS="Edit,Write,MultiEdit,NotebookEdit"
 | `archive-store.mjs` | 持久会话存储 + DSH 归档写入器 |
 | `index.mjs` | cordis 插件入口（`dsh.acp` 服务 + 适配器进程管理器；long 模式 in-process host） |
 | `lib/runtime-switch.mjs` | 双 runtime mode 解析 + 4-mode permission config + tryLongFallbackSpawn |
-| `lib/long-runtime.mjs` | long 模式 LongRuntime class（v0.2.2 占位；P1.5+ 接入 ctx.llm.stream） |
-| `lib/client.js` | dsh web React 面板（**0.2.1 / 0.3.0 默认隐藏** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
+| `lib/long-runtime.mjs` | long 模式 LongRuntime class（接入 ctx.llm.stream、4-mode 审批、温度 / 推理强度切换） |
+| `lib/client.js` | dsh web React 面板（**默认不随 npm 包发布** npm `files`，仅 `test/p1b-dsh-web-ui` 分支打包） |
 | `cordis.patch.yml` | 供 `dsh plugin ... add obsidian-dsh-acp` 使用的插件插入层 |
 | `install.sh` | 一键安装脚本（DSH profile + Obsidian custom agent） |
 | `install.ps1` | Windows 一键安装脚本（install.sh 的 PowerShell 版；分离 `-PluginProfile` / `-RuntimeProfile`，写入 `DSH_BIN=<dsh.cmd>`） |
@@ -234,7 +312,55 @@ node 拉起），设置 `nodePath` / `command=node.exe + args=[adapter]`，且�
 
 ```bash
 node dsh-acp.mjs            # 在 stdin/stdout 上提供 ACP v1 服务
+node dsh-acp.mjs doctor     # 健康检查 + 一键修复提示（v0.1.x 实验性）
 ```
+
+### 健康检查 / 修复（`doctor`，实验性）
+
+当 DSH 或 Obsidian 报告连接问题（"ACP connection closed"、"dsh exited 1"、
+`MISSING_CREDENTIAL` …）时，适配器会在 ACP 回复里**自动注入一段诊断块**，
+带可一键复制粘贴执行的修复命令。你也可以单独跑一次健康检查：
+
+```bash
+node dsh-acp.mjs doctor            # 诊断 + 输出可一键修复的命令
+node dsh-acp.mjs doctor --auto              # 仅预览修复计划（不写任何文件）
+node dsh-acp.mjs doctor --auto --apply      # 才执行；且只执行 user-authorized 项（manual 项永不自动执行）
+```
+
+`doctor` 是 **版本无关的** —— 它能同时在 `0.1.1-rc.2` 和 `0.1.2-alpha` 的 dsh 上
+工作，只做通用检查（dsh 二进制、dsh 版本、缺失的 API key 凭据、npm 更新提示）。
+它不依赖任何 dsh 特定版本内部 API。
+
+doctor 在 R2 阶段已覆盖 **8 项 Obsidian 侧依赖检查**（vault 配置、Agent Client
+插件状态、`data.json` 自定义代理、`DSH_BIN` 解析、API key、profile 路径、归档
+目录、cordis 服务注册），并通过 R3 的 `--fix <item>` / `--auto` 提供一键修复：
+仅对用户授权项写入，写入前自动备份；改动**不热生效**，需重启 Obsidian。
+
+### 会话垃圾回收（`gc`，自动）
+
+**问题：** Obsidian Agent Client 的 delete 按钮只删它本地的
+`sessions/<id>.json`，从来不发 ACP `session/delete` —— 所以
+obsidian-dsh-acp 自己的持久索引 + 归档会过期，会话在下一次 `session/list` 时
+「复现」了。
+
+**修复（自动）：** 每次 `session/list` 时，适配器会拿自己的持久会话索引与
+Obsidian 本地的 `agent-client/sessions` 目录对账，删掉 Obsidian 已经不再追踪的
+会话（含磁盘归档）。这处是保守策略 —— Obsidian 仍存在的会话**绝不**删除。
+
+**检测 / 手动触发：**
+```bash
+node dsh-acp.mjs doctor          # 展示检测到了哪些 Obsidian sessions 目录，以及 orphan 数量
+node dsh-acp.mjs doctor --gc     # 立刻跑一次垃圾回收
+```
+
+**配置环境变量：**
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `DSH_ACP_GC` | `on` | `off` 关闭自动 GC |
+| `DSH_ACP_GC_OBSIDIAN_DIRS` | *（自动检测）* | 逗号分隔的额外 `agent-client/sessions` 目录用于对账 |
+| `DSH_ACP_GC_NEED_ARCHIVE` | `0` | 为 `1` 时，只删除仍然带磁盘归档的 orphan |
+| `DSH_ACP_GC_REPORT_ONLY` | `0` | `1` = dry-run（仅报告，绝不删除） |
+| `DSH_ACP_GC_VERBOSE` | `0` | `1` = 把 GC 操作写到 stderr |
 
 ### 配置（Obsidian Agent Client）
 

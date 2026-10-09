@@ -49,7 +49,7 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
   возвращается `result` (`stopReason: "end_turn"`).
 - Учитывается `cwd`; постоянный слой сессий делает управление сессиями удобным.
 
-## Двухрежимная архитектура (v0.2.2+ / каркас P2 long-running)
+## Двухрежимная архитектура (каркас P2 long-running)
 
 Чтобы в Obsidian получить **диалоговое окно одобрения инструментов** и
 **отображение хода рассуждений / выполнения в реальном времени**, адаптер
@@ -61,7 +61,7 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
 │  Точка входа A: dsh-acp.mjs как автономный бинарник              │
 │  (запускается Obsidian Agent Client)                              │
 │  · Нет cordis ctx, runtime.mode всегда = "spawn" (обратная совм.) │
-│  · Идёт существующим путём v0.2.1: spawn dsh --profile headless    │
+│  · Идёт существующим spawn-путём: spawn dsh --profile headless      │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -74,10 +74,10 @@ Obsidian Agent Client ──(ACP JSON-RPC через stdin/stdout)──▶ dsh-
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Текущее состояние (v0.2.2 / каркас P1.0)**: long-режим уже может быть
-запущен in-process cordis-плагином, но точка входа пока бросает
-P1.0-placeholder — ожидается подключение `ctx.llm.stream()` (P1.5),
-4-mode одобрения (P2.0) и temperature/reasoningEffort (P2.5).
+**Текущее состояние (0.3.3)**: long-режим реализован end-to-end внутри
+cordis-плагина in-process. Подключены: поток LLM (`ctx.llm.stream()` → ACP
+`sessionUpdate`), 4-mode одобрения (`DSH_ACP_PERMISSION_MODE`), двухуровневое
+переключение моделей, а также переключатели temperature / reasoningEffort.
 Путь spawn остаётся неизменным на 100%.
 
 **Приоритет разбора режима** (`lib/runtime-switch.mjs::resolveRuntimeMode()`):
@@ -246,6 +246,13 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 
 ## Поддержка версий dsh
 
+> **Диапазон peer обязан содержать явные ветви для пре-релизов.** `node-semver` пропускает пре-релизную сборку только если в диапазоне есть компаратор с тем же `major.minor.patch` и собственной пре-релизной меткой. Поэтому «широкий на вид» диапазон (`>=0.1.6-alpha.1 <0.3.0-0`) молча исключает все хосты `0.2.x` — включая оба наших реальных якоря. Объявленный диапазон перечисляет их явно:
+>
+> `>=0.1.6-alpha.1 <0.3.0-0 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-alpha.1`
+>
+> (Источник истины: `package.json` → `peerDependencies["@deepseek-ai/dsh-acp"]`; помечен `optional` через `peerDependenciesMeta`. Правило также описано в upstream `contributing.md` проекта awesome-dsh-plugin.)
+
+
 | Версия dsh | legacy spawn | P2 long-running | official bridge |
 |---|---|---|---|
 | `0.3.0` | ✅ | ✅ | ✅ (env switch, **official-мост opt-in требует апстрим dsh**; Path A spawn-путь автономно даёт tool-фреймы, см. Known Limitations ниже) |
@@ -264,6 +271,17 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 но режим long-running на ней не проверялся, поэтому адаптер намеренно откатывается
 на путь spawn вместо риска `ERR_MODULE_NOT_FOUND` при импорте.
 
+**Peer-диапазон (релиз 0.3.3).** Плагин объявляет peer-зависимость явным объединением
+`>=0.1.6-alpha.1 <0.3.0-0 || <prerelease-линия A> || <prerelease-линия B> || <prerelease-линия C>`
+(каноничная строка — в `peerDependencies` / `peerDependenciesMeta`
+`@deepseek-ai/dsh-acp` в `package.json`; хвостовые оговорки `||` перечисляют
+валидированные prerelease-линии dsh для этого релиза). Согласно правилу
+node-semver, описанному в contributing-руководстве `awesome-dsh-plugin`,
+**peer-диапазон без явного перечисления каждой prerelease-линии молча исключает
+все prerelease-версии хоста** — поэтому явные оговорки `||` выше необходимы,
+чтобы плагин оставался устанавливаемым на текущие prerelease-сборки dsh, а не
+отбрасывался молча.
+
 ## Файлы
 
 | Путь | Назначение |
@@ -272,12 +290,12 @@ dsh-native сессии** (видимые в списке диалогов dsh �
 | `archive-store.mjs` | Постоянное хранилище сессий + запись архива в формате DSH |
 | `index.mjs` | Точка входа cordis-плагина (сервис `dsh.acp` + менеджер процесса адаптера; long-режим — in-process host) |
 | `lib/runtime-switch.mjs` | Разбор dual runtime mode + 4-mode permission config + tryLongFallbackSpawn |
-| `lib/long-runtime.mjs` | Класс LongRuntime long-режима (v0.2.2 placeholder; в P1.5+ подключается к ctx.llm.stream) |
-| `lib/chunk-mapper.mjs` | Чистая функция: чанки LLM → ACP sessionUpdate (P1.5) |
-| `lib/llm-event-bridge.mjs` | Класс LLMStreamBridge: ctx.llm.stream() → ACP update (P1.5) |
-| `lib/permission-gate.mjs` | 4-mode permission gate + кэш + таймаут (P2.0) |
-| `lib/settings-provider-catalog.mjs` | Каталог провайдеров + моделей для FE-1 двух-уровневого переключения (v0.2.3) |
-| `lib/client.js` | React-панель dsh web (**в v0.2.1 / 0.3.0 по умолчанию скрыта** в npm `files`, упаковывается только в test-ветке `test/p1b-dsh-web-ui`) |
+| `lib/long-runtime.mjs` | Класс LongRuntime long-режима (подключает ctx.llm.stream, 4-mode одобрения, temperature / reasoningEffort) |
+| `lib/chunk-mapper.mjs` | Чистая функция: чанки LLM → ACP sessionUpdate |
+| `lib/llm-event-bridge.mjs` | Класс LLMStreamBridge: ctx.llm.stream() → ACP update |
+| `lib/permission-gate.mjs` | 4-mode permission gate + кэш + таймаут |
+| `lib/settings-provider-catalog.mjs` | Каталог провайдеров + моделей для FE-1 двух-уровневого переключения |
+| `lib/client.js` | React-панель dsh web (**по умолчанию не входит в npm-пакет** в `files`, упаковывается только в test-ветке `test/p1b-dsh-web-ui`) |
 | `web/session-panel.mjs` | Бэкенд dsh web-панели: маршруты `/api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}` |
 | `web/obsidian-import.mjs` | Обнаружение и импорт в один клик сессий Obsidian Agent Client → dsh native-хранилище (SessionHandle, V3) |
 | `cordis.patch.yml` | Слой вставки плагина для `dsh plugin ... add obsidian-dsh-acp` |
@@ -388,7 +406,8 @@ node dsh-acp.mjs doctor                # проверка здоровья + п�
 
 ```bash
 node dsh-acp.mjs doctor                # диагностика + вывод команд ремонта
-node dsh-acp.mjs doctor --auto         # попытка авто-ремонта (каждый шаг спрашивает подтверждение)
+node dsh-acp.mjs doctor --auto                  # только ПРЕДПРОСМОТР плана (ничего не пишет)
+node dsh-acp.mjs doctor --auto --apply          # выполнить; только пункты user-authorized (manual — никогда)
 ```
 
 `doctor` — **версия-агностик** — работает и с `0.1.1-rc.2`, и с `0.1.2-alpha`
