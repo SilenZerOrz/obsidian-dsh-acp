@@ -2,11 +2,11 @@
 //
 // 设计原则：
 //  - 只做通用检查（dsh 二进制 / 版本 / 凭据缺失 / 插件版本），不依赖任何 dsh 版本特有的 ACP API。
-//  - "修复指引"输出为可直接复制的 shell 命令；自动修复必须显式确认（--auto 或用户回复确认）。
+//  - "修复指引"输出为可直接复制的 shell 命令；修复默认**只预览**，`--apply` 才执行，且**仅执行 user-authorized 项**（manual 项永不自动执行）。
 //
 // 用法：
 //  - node dsh-acp.mjs doctor          体检并打印诊断 + 修复命令
-//  - node dsh-acp.mjs doctor --auto   尝试自动修复（每步先提示将执行的操作，需确认）
+//  - node dsh-acp.mjs doctor --auto[ --apply]   默认只打印修复计划；加 --apply 才执行 user-authorized 项
 //  - 程序内: import { diagnoseFromError, formatFixHints } from "./doctor.mjs"
 
 import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -15,9 +15,18 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+/**
+ * 读取文本并去除 UTF-8 BOM。
+ * ⚠️ 必须与 readFileSync 一样在失败时**抛错**（不要 try/catch 吞掉）——
+ * 多处调用点依赖 try/catch 控制流，吞错会改变行为。
+ */
+export function readTextSafe(file) {
+  return readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+}
+
 // 本插件版本（与 package.json 保持同步）：从同目录 package.json 读，避免依赖 cwd
 const _PKG = JSON.parse(
-  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+  readTextSafe(join(dirname(fileURLToPath(import.meta.url)), "package.json")),
 );
 export const ADAPTER_VERSION = _PKG.version;
 
@@ -40,11 +49,15 @@ export function detectDshBinary() {
   // Windows 兜底：npm 全局安装的 dsh 只有 .cmd/.ps1/sh 三种垫片——CreateProcess
   // 无法执行无扩展名 sh 垫片，Node spawn 也不做 PATHEXT 解析（裸名 → ENOENT），
   // 所以在 PATH 上显式找 dsh.cmd。
+  // 进一步：必须校验 .cmd 能解析出 JS 入口，否则它只是一段「无害但无法 spawn」的
+  // 内容（实测有用户装了同名但内容无关的 dsh.cmd 在更早的 PATH 目录）——此时跳过它，
+  // 继续找下一个 PATH 目录（不要 return 一个无效路径）。
   if (process.platform === "win32") {
     for (const dir of (process.env.PATH ?? "").split(";")) {
       if (!dir) continue;
       const p = join(dir.trim(), "dsh.cmd");
-      try { accessSync(p, fsConstants.X_OK); return p; } catch { /* next */ }
+      try { accessSync(p, fsConstants.X_OK); } catch { continue; }
+      if (parseCmdShimEntry(p)) return p;
     }
   }
   return "dsh";
@@ -98,7 +111,7 @@ function findCmdShimOnPath(name) {
 /** 解析 npm cmd-shim 中被引号包住的 JS 入口路径（%dp0% / %~dp0 → 垫片目录）。 */
 function parseCmdShimEntry(cmdFile) {
   try {
-    const text = readFileSync(cmdFile, "utf8");
+    const text = readTextSafe(cmdFile);
     // 典型形态：endLocal & ... & "%_prog%"  "%dp0%\node_modules\...\lib\bin.js" %*
     const m = text.match(/"([^"]+\.js)"/);
     if (!m) return null;
@@ -249,7 +262,7 @@ export function diagnoseHeadlessProfile() {
   // ----- 层 1: cordis.patch.yml 默认 model -----
   if (existsSync(cordisYml)) {
     let cordis = "";
-    try { cordis = readFileSync(cordisYml, "utf8"); } catch {}
+    try { cordis = readTextSafe(cordisYml); } catch {}
     // 已知失效路径：deepseek-official/*（用户报告 key 0700 invalid）
     if (/provider:\s*deepseek-official/.test(cordis) || /model:\s*deepseek-v4-flash\b/.test(cordis)) {
       issues.push({
@@ -289,7 +302,7 @@ export function diagnoseHeadlessProfile() {
   // ----- 层 2: package.json 缺核心 devDeps -----
   if (existsSync(pkgJson)) {
     let pkg = null;
-    try { pkg = JSON.parse(readFileSync(pkgJson, "utf8")); } catch {}
+    try { pkg = JSON.parse(readTextSafe(pkgJson)); } catch {}
     const deps = { ...(pkg?.devDependencies ?? {}), ...(pkg?.dependencies ?? {}) };
     const required = [
       "@deepseek-ai/dsh-llm",
@@ -331,7 +344,7 @@ export function diagnoseHeadlessProfile() {
   // ----- 层 3: pnpm-workspace.yaml 缺 overrides + allowBuilds -----
   if (existsSync(wsYaml)) {
     let ws = "";
-    try { ws = readFileSync(wsYaml, "utf8"); } catch {}
+    try { ws = readTextSafe(wsYaml); } catch {}
     const hasOverrides = /^overrides:/m.test(ws);
     const hasAllowBuilds = /^allowBuilds:/m.test(ws);
     if (!hasOverrides || !hasAllowBuilds) {
@@ -366,7 +379,7 @@ export function diagnoseHeadlessProfile() {
   // ----- 层 4: cordis.patch.yml plugin name 错 -----
   if (existsSync(cordisYml)) {
     let cordis = "";
-    try { cordis = readFileSync(cordisYml, "utf8"); } catch {}
+    try { cordis = readTextSafe(cordisYml); } catch {}
     // 已知错名：@deepseek-ai/dsh-settings-file（已废弃，应直接挂 llm-pi-ai）
     if (/@deepseek-ai\/dsh-settings-file/.test(cordis)) {
       issues.push({
@@ -440,7 +453,7 @@ export function formatDiagnosis(issues, { pluginUpdateHint = "" } = {}) {
     }
   }
   if (pluginUpdateHint) lines.push("", `• 插件更新：${pluginUpdateHint}`);
-  lines.push("", "自动修复：如需我自动执行以上某一步，回复「修复 <序号>」；或终端运行 `dsh-acp doctor --auto`（每步会先说明将执行的操作并请你确认）。");
+  lines.push("", "自动修复：`dsh-acp doctor --auto` 只**预览**修复计划；确认后加 `--apply` 才执行（仅 user-authorized 项；manual 项仅提示，永不自动执行）。");
   return lines.join("\n");
 }
 
@@ -525,7 +538,7 @@ export const DSH_ACP_PEER_RANGE = ">=0.1.6-alpha.1 <0.3.0";
 export const MIN_NODE_VERSION = "22.13.0";
 
 function readJsonSafe(file) {
-  try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; }
+  try { return JSON.parse(readTextSafe(file)); } catch { return null; }
 }
 
 /**
