@@ -42,6 +42,7 @@ import { detectDshBinary, resolveDshSpawnSpec } from "./doctor.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
 import { validateCwd } from "./lib/cwd-validator.mjs";
 import { hasHeadlessJson } from "./lib/version-detect.mjs";
+import { PERMISSION_MODES } from "./lib/permission-gate.mjs";
 import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
 import {
@@ -747,13 +748,43 @@ function createAgent() {
 
     async closeSession() { return undefined; },
     async setSessionMode(params) {
-      // M2.4 revert (2026-09-19): UI regression — dsh-web session-management
-      // button click has no response. Revert to no-op stub while we identify
-      // the offending field. The 4-mode + persistence implementation was
-      // correct (258 unit tests + acp-feature-test 6 checks pass) — but the
-      // dsh-web React frontend appears not to handle the expanded modes
-      // payload, breaking UI buttons.
-      return undefined;
+      // W1 (2026-10-09, t23): real implementation, replacing the M2.4 no-op stub.
+      //
+      // Provenance note: the original 4-mode implementation was searched for
+      // across all 171 revs / all branches and is NOT in git history — the
+      // revert commit df13641's parent already carried the one-liner stub, so
+      // that work only ever existed in a working tree. This body is therefore
+      // written fresh against the infrastructure that did survive:
+      //   - lib/permission-gate.mjs:40  PERMISSION_MODES (single source of truth)
+      //   - lib/permission-gate.mjs:165 PermissionGate.setMode() (validates + clears cache)
+      //   - archive-store.mjs:270       updateSessionMeta() whitelists `mode`
+      //   - globalThis.__DSH_LONG_RUNTIME__.gate (live long-runtime only)
+      //
+      // SCOPE NOTE (deliberate): `initializeModes()` still advertises only
+      // `default`. Expanding the advertised list to 4 modes is what triggered
+      // the M2.4 dsh-web UI regression, and spec §阶段1 does not ask for it, so
+      // it is intentionally left alone. Consequence: we ACCEPT all 4 modes when
+      // a client sends them, but still OFFER only `default` in the payload.
+      const session = getSession(params.sessionId);
+      if (!session) throw new RequestError(`session ${params.sessionId} not found`);
+
+      const mode = params.modeId;
+      if (typeof mode !== "string" || !PERMISSION_MODES.has(mode)) {
+        // Reject loudly — never silently ignore an unknown mode.
+        throw new RequestError(
+          `invalid modeId ${JSON.stringify(mode)}: expected one of ${[...PERMISSION_MODES].join(", ")}`,
+        );
+      }
+
+      // 1) live gate (spawn mode / uninitialised long-runtime => no gate, persist only)
+      const rt = globalThis.__DSH_LONG_RUNTIME__;
+      if (rt && rt.gate) rt.gate.setMode(mode);
+
+      // 2) persist so resume/load keeps the choice (archive-store whitelists `mode`)
+      updateSessionMeta(params.sessionId, { mode });
+
+      // 3) echo the (unchanged) advertised modes payload
+      return { modes: initializeModes() };
     },
     async setSessionConfigOption(params) {
       // Per-session config override (FEAT). Recognised configIds:
