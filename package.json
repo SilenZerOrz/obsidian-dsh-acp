@@ -1,6 +1,6 @@
 {
   "name": "obsidian-dsh-acp",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Expose DeepSeek Harness (DSH) over the Agent Client Protocol (ACP) for Obsidian Agent Client (and other ACP clients). Install as a Custom Agent in Obsidian, or as a cordis plugin in a DSH profile, to drive DSH right from Obsidian — list/resume/fork sessions, run the harness, and archive conversations.",
   "author": {
     "name": "SilenZerOrz",
@@ -39,19 +39,27 @@
     "install.sh",
     "install.ps1",
     "README.md",
+    "README.zh-CN.md",
+    "README.ru.md",
     "LICENSE"
   ],
   "scripts": {
-    "start": "node dsh-acp.mjs"
+    "start": "node dsh-acp.mjs",
+    "test:unit": "node --test test/runtime-switch.test.mjs test/long-runtime.test.mjs test/long-runtime-tools-injection.test.mjs test/config-schema.test.mjs test/chunk-mapper.test.mjs test/llm-event-bridge.test.mjs test/permission-gate.test.mjs test/session-config.test.mjs test/settings-provider-catalog.test.mjs test/http-gateway.test.mjs test/proxy-mode.test.mjs test/http-gateway-bidi.test.mjs test/acp-tool-translation.test.mjs test/abort-utils.test.mjs test/cwd-validator.test.mjs test/headless-json-parser.test.mjs test/headless-json-flag-detect.test.mjs test/doctor-headless-profile.test.mjs test/doctor-windows-spawn.test.mjs",
+    "test:officials": "node --test test/acp-official-router.test.mjs test/acp-official-router-session-c.test.mjs test/dsh-acp-apply-spike.test.mjs test/official-acp-bridge.test.mjs test/official-bridge-alignment.test.mjs test/http-gateway-official.test.mjs test/http-gateway-session-c.test.mjs test/http-gateway-tool-translation.test.mjs test/http-gateway-tool-translation-concurrent.test.mjs",
+    "test:realllm": "node --test test/http-gateway-official-dod.test.mjs test/official-bridge-realllm-alignment.test.mjs test/official-bridge-realllm-tool.test.mjs",
+    "test:protocol": "node acp-feature-test.mjs",
+    "test:long": "node acp-feature-test.mjs --runtime long",
+    "test:all": "npm run test:unit && npm run test:protocol && npm run test:long"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
-    "@deepseek-ai/dsh-acp": "0.1.6-alpha.1",
     "@deepseek-ai/schemastery": "^3.18.1",
     "react": "^18.0.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-acp": ">=0.1.6-alpha.1 <0.3.0",
     "zod": "^3.25.76"
   },
   "dsh": {
@@ -76,9 +84,12 @@
   "license": "MIT",
   "engines": {
     "node": ">=22.13",
-    "dsh": ">=0.1.5-rc.3"
+    "dsh": ">=0.1.6-alpha.1"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-acp": {
+      "optional": "true"
+    },
     "dsh-better-sidebar": {
       "optional": "true"
     },

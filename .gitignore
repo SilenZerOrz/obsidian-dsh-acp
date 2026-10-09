@@ -43,3 +43,6 @@ test/
 scripts/
 acp-feature-test.mjs
 test-validate-cwd.mjs
+
+# AgentTeams plugin runtime state (per-machine, not source)
+.agent-teams/

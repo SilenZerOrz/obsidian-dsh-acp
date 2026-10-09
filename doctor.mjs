@@ -122,7 +122,7 @@ export function getDshVersion() {
  * 兼容 dsh 0.1.1-rc.2 与 0.1.2-alpha 的 MISSING_CREDENTIAL 报错格式：
  *   dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"
  *   → 缺 DEEPSEEK_API_KEY
- *   baseURL http://10.10.10.9:58088 ... (deepseeklocal provider → DEEPSEEKLOCAL_API_KEY)
+ *   baseURL <LOCAL_GATEWAY_BASE_URL> ... (deepseeklocal provider → DEEPSEEKLOCAL_API_KEY)
  */
 export function parseCredentialIssue(errMsg) {
   if (!errMsg || typeof errMsg !== "string") return null;
@@ -399,7 +399,7 @@ export function diagnoseHeadlessProfile() {
           `        displayName: jl-token`,
           `        apiKeyEnv: JL_TOKEN_API_KEY`,
           `        api: openai-completions`,
-          `        baseURL: http://cdn.shenkeinfo.net/v1`,
+          `        baseURL: <YOUR_GATEWAY_BASE_URL>   # 例如 https://<your-gateway-host>/v1`,
           `        models:`,
           `          - id: gemini-2.5-pro`,
           `            name: gemini-2.5-pro`,

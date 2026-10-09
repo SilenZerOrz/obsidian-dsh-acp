@@ -59,7 +59,7 @@ import z from "@deepseek-ai/schemastery";
 import { registerSessionPanelRoutes } from "./web/session-panel.mjs";
 import { registerHttpGateway } from "./lib/http-gateway.mjs";
 import { resolveRuntimeConfig, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
-import { hasP2Apis } from "./lib/version-detect.mjs";
+import { hasP2Apis, probeHostApiSurface, hostApiSurfaceSummary } from "./lib/version-detect.mjs";
 
 /**
  * Manages the dsh-acp ACP adapter subprocess for the harness and exposes the
@@ -114,6 +114,20 @@ export class DshAcpService extends Service {
 				const msg = `effective runtime mode = ${rtConfig.mode} (P2 APIs available: ${hasP2Apis()}; spawnFallback: ${rtConfig.spawnFallback})`;
 				_acpLog("info", msg);
 				this.ctx?.logger?.info?.(`[dsh-acp] ${msg}`);
+				// a1-audit G2: surface silent long-runtime API drift. Never throws,
+				// never blocks boot — missing markers are reported, not enforced.
+				try {
+					const api = probeHostApiSurface(this.ctx);
+					if (api.missing.length > 0) {
+						const drift = `host API surface drift — missing: ${api.missing.join(", ")} (long-runtime tool wiring may degrade silently)`;
+						_acpLog("warn", drift);
+						this.ctx?.logger?.warn?.(`[dsh-acp] ${drift}`);
+					} else {
+						_acpLog("info", hostApiSurfaceSummary(this.ctx));
+					}
+				} catch {
+					// probe is diagnostic only; never let it affect boot
+				}
 				const boot = useLong ? this.startLong() : this.start();
 				boot
 					.then((rt) => {
