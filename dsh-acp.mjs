@@ -215,7 +215,12 @@ function resolveDshAcpDefaultModelId() {
   if (process.env.DSH_ACP_DEFAULT_MODEL) return process.env.DSH_ACP_DEFAULT_MODEL;
   const p = readProfileDefaultModel();
   if (p) return `${p.provider}/${p.model}`;
-  return "jl-token/gemini-2.5-pro";
+  if (process.env.DSH_ACP_FALLBACK_MODEL) return process.env.DSH_ACP_FALLBACK_MODEL;
+  process.stderr.write(
+    "[dsh-acp] WARN: no DSH_ACP_DEFAULT_MODEL env, profile unreadable; " +
+      "falling back to tool-capable default - provider name may mismatch -> NO_ADAPTER\n",
+  );
+  return "jl-token/gemini-2.5-pro"; // 805d20c: tool-capable 兜底
 }
 
 function splitModel(combo) {
