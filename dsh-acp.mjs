@@ -42,6 +42,7 @@ import { detectDshBinary, resolveDshSpawnSpec } from "./doctor.mjs";
 import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
 import { validateCwd } from "./lib/cwd-validator.mjs";
 import { hasHeadlessJson } from "./lib/version-detect.mjs";
+import { readProfileDefaultModel } from "./lib/http-gateway.mjs";
 import { PERMISSION_MODES } from "./lib/permission-gate.mjs";
 import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
@@ -196,7 +197,12 @@ if (logDir) {
 // per-session model switching never mutates the user's shared profile settings.
 // FEAT (FE-1): the default provider used when a `provider/model` session value
 // is missing its provider part. Mirrors the headless profile's `agent-default-model`.
-const DEFAULT_PROVIDER = process.env.DSH_ACP_DEFAULT_PROVIDER || "jl-token";
+// t38: 不再兜硬编码 "jl-token" —— env 缺失时为 null，交由 gateway/profile 决定，
+// 避免与 profile 实际注册的 provider 名错配（NO_ADAPTER → 静默 cancelled）。
+const DEFAULT_PROVIDER =
+  process.env.DSH_ACP_DEFAULT_PROVIDER ||
+  process.env.DSH_ACP_DEFAULT_MODEL?.split("/")[0] ||
+  null;
 
 /**
  * Split a `provider/model` combination (the flattened value we store on the
@@ -204,6 +210,14 @@ const DEFAULT_PROVIDER = process.env.DSH_ACP_DEFAULT_PROVIDER || "jl-token";
  * sessions) resolves to the default provider, matching how `agent-default-model`
  * is patched for a provider-less override.
  */
+/** t38: 默认模型 id —— env → profile（agent-default-model）→ 原硬编码兜底。 */
+function resolveDshAcpDefaultModelId() {
+  if (process.env.DSH_ACP_DEFAULT_MODEL) return process.env.DSH_ACP_DEFAULT_MODEL;
+  const p = readProfileDefaultModel();
+  if (p) return `${p.provider}/${p.model}`;
+  return "jl-token/gemini-2.5-pro";
+}
+
 function splitModel(combo) {
   if (!combo || typeof combo !== "string") return { provider: DEFAULT_PROVIDER, model: undefined };
   const idx = combo.indexOf("/");
@@ -219,7 +233,9 @@ function modelPatchArgs(model, provider) {
     `- id: agent-default-model`,
     `  name: '@deepseek-ai/dsh-agent-default-model'`,
     `  config:`,
-    `    provider: ${prov}`,
+    // t38: provider 为 null 时不写出 provider 行（不要产出 `provider: undefined/`），
+    // 让该 patch 继承 dsh 自身的 agent-default-model，保持生成物是合法 YAML。
+    ...(prov ? [`    provider: ${prov}`] : []),
     `    model: ${model}`,
     ``,
   ].join("\n"));
@@ -442,7 +458,8 @@ const FALLBACK_MODELS = [
   // DeepSeek-V4-Flash stays in the list as a known non-tool-capable option,
   // but no longer as the silent default. Override per-host via
   // DSH_ACP_DEFAULT_MODEL=<provider/model>.
-  { id: process.env.DSH_ACP_DEFAULT_MODEL || "jl-token/gemini-2.5-pro" },
+  // t38: 默认模型改为读 profile（可注入 opts 供测试）；解析不到再退回原硬编码。
+  { id: resolveDshAcpDefaultModelId() },
   { id: "Kimi-K2.6" },
   { id: "DeepSeek-V4-Flash" },
   { id: "Qwen3.8" },
@@ -1109,7 +1126,10 @@ async function runAcpDualMode() {
       acpClient: { notify: async () => {} },
       permissionConfig,
       cwd: process.cwd(),
-      model: process.env.DSH_ACP_DEFAULT_MODEL ?? process.env.DSH_ACP_DEFAULT_MODEL_FOR_TEST ?? "default/test-model",
+      model:
+        process.env.DSH_ACP_DEFAULT_MODEL ??
+        process.env.DSH_ACP_DEFAULT_MODEL_FOR_TEST ??
+        (() => { const p = readProfileDefaultModel(); return p ? `${p.provider}/${p.model}` : "default/test-model"; })(),
     });
     // Stash the runtime on globalThis so the ACP prompt handler can route
     // long-mode turns through it.
