@@ -167,6 +167,43 @@ if (process.env.DSH_PROFILE && process.env.DSH_PROFILE !== SPAWN_PROFILE) {
 
 const DSH_EXTRA_ARGS = (process.env.DSH_ARGS ?? "").split(" ").filter(Boolean);
 
+/**
+ * t54：首轮抢跑探针的修复。
+ *
+ * 背景（t53 时间戳确证）：启动时 `probeDshWebGateway()` 是 **fire-and-forget**（未 await），
+ * 而路径判定点只看 `globalThis.__DSH_ACP_PROXY_BASE_URL__`。启动后**第一条 prompt**
+ * 常早于探针 resolve（实测早 94ms）⇒ 误走 spawn 路径 ⇒ turn 1 表现异常
+ * （t46/t48/t50 反复出现的「turn1 坏 / turn2 好」同型现象）。
+ *
+ * 修复：判定改为 **per-prompt 惰性 resolve + 超时**——
+ *   · 已有缓存 baseUrl → 直接用；
+ *   · 探针在飞 → **await 它**（同一 promise 多消费者安全），最多等
+ *     `DSH_ACP_PROBE_TIMEOUT_MS`（默认 3000ms）；
+ *   · 超时或探针未启用 → 返回 null ⇒ **默认走 spawn**（与旧行为一致，不阻塞用户）。
+ *
+ * 竞态安全：唯一共享状态是 `__DSH_ACP_PROXY_BASE_URL__`（探针只写一次、幂等），
+ * 本函数只读 + await 同一个 promise，**不引入新的可变状态或锁**。
+ */
+const PROMPT_PROBE_TIMEOUT_MS = Number(process.env.DSH_ACP_PROBE_TIMEOUT_MS ?? 3000);
+
+async function resolveProxyBaseUrlForPrompt() {
+  const cached = globalThis.__DSH_ACP_PROXY_BASE_URL__;
+  if (cached) return cached;
+  const pending = globalThis.__DSH_ACP_PROXY_PROBE__;
+  if (!pending) return null; // 探针未启用（shouldAttemptProxy()=false）⇒ spawn
+  let timer = null;
+  try {
+    const base = await Promise.race([
+      pending,
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), PROMPT_PROBE_TIMEOUT_MS); }),
+    ]);
+    return base ?? globalThis.__DSH_ACP_PROXY_BASE_URL__ ?? null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+
 function dshBaseArgs() {
   return ["--profile", SPAWN_PROFILE, ...DSH_EXTRA_ARGS];
 }
@@ -949,8 +986,10 @@ function createAgent() {
       // here we forward via fetch SSE and translate sessionUpdate events to
       // ctx.client.notify. Fallback path (proxy fail) throws and the caller
       // gets an end_turn error — long-runtime mode could retry via spawn.
-      if (globalThis.__DSH_ACP_PROXY_BASE_URL__) {
-        const baseUrl = globalThis.__DSH_ACP_PROXY_BASE_URL__;
+      // t54：per-prompt 惰性判定（带超时）—— 消除「首轮抢在探针 resolve 之前」的误判。
+      const proxyBaseUrl = await resolveProxyBaseUrlForPrompt();
+      if (proxyBaseUrl) {
+        const baseUrl = proxyBaseUrl;
         process.stderr.write(`[dsh-acp] proxy forward session=${params.sessionId}\n`);
         // t44: 必须在写入本轮 user 消息**之前**取历史——否则本轮 prompt 会
         // 同时出现在 history 与「当前 prompt」里，模型会看到两遍同一句话。
@@ -1294,17 +1333,24 @@ function runAcp() {
 	// 触发时 probe 通常已完成,后续 turn 一定走 proxy。
 	// 失败/超时/未启用:stderr 一行 hint,继续 spawn(向后兼容)。
 	if (shouldAttemptProxy()) {
-		probeDshWebGateway().then((probe) => {
+		// t54：仍然在后台探（不阻塞启动），但把**同一个 promise 记录下来**，
+		// 并让它 resolve 成 `baseUrl | null` —— 供 resolveProxyBaseUrlForPrompt()
+		// 在每条 prompt 前 await（带超时）。`.catch` 也返回 null ⇒ 永不 reject ⇒ 可安全 await。
+		globalThis.__DSH_ACP_PROXY_PROBE__ = probeDshWebGateway().then((probe) => {
 			if (probe.ok) {
 				globalThis.__DSH_ACP_PROXY_BASE_URL__ = probe._baseUrl;
 				process.stderr.write(
 					`[dsh-acp] proxy mode: ${probe._baseUrl} (gateway v${probe.version ?? "?"}, mode=${probe.mode ?? "?"}, longReady=${probe.longReady === true})\n`,
 				);
-			} else if (probe.reason) {
+				return probe._baseUrl;
+			}
+			if (probe.reason) {
 				process.stderr.write(`[dsh-acp] probe failed (${probe.reason}); spawn mode\n`);
 			}
+			return null;
 		}).catch((e) => {
 			process.stderr.write(`[dsh-acp] probe exception: ${e?.message ?? e}; spawn mode\n`);
+			return null;
 		});
 	}
 	// 自然退出 - 8s 后强退,保证所有 timer fire
