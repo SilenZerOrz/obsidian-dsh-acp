@@ -493,6 +493,29 @@ custom-agent 的 `env`，或 profile/托管进程）：
 - `~/.dsh/profiles/headless/cordis.patch.yml` —— 通过 `settings` id 覆盖挂载该设置文件，
   并设置 `agent-default-model`。
 
+## Obsidian agent-client 集成（proxy 与 spawn）
+
+要在 Obsidian 里跑本适配器，需在 Agent Client 插件设置中新增一个 **custom agent**。
+有两点容易写错，务必注意：
+
+1. **`customAgent.env` 是 `{ key, value }` 对象数组，不是 `"KEY=VALUE"` 字符串。**
+   Agent Client 用 reduce 遍历该数组来构造子进程环境
+   （`env.reduce((acc, { key, value }) => …)`），写成纯字符串条目会被忽略。
+2. 适配器**按轮次**选择传输方式：
+   * **proxy**（本机有 dsh web 网关时推荐）—— 把该轮经 HTTP/SSE 转给已在运行的网关；
+   * **spawn**（回退）—— 自己起一个 `dsh --profile <profile> <prompt>` 子进程。
+
+推荐的两项 `env`：
+
+| key | value | 作用 |
+|---|---|---|
+| `DSH_ACP_HTTP_GATEWAY_URL` | `http://127.0.0.1:3080` | 指向 dsh web 网关 |
+| `DSH_ACP_PROXY_MODE` | `true` | 要求使用 proxy 传输 |
+
+**两项都不配**时，适配器走 **spawn（headless）**，这需要系统已安装 `dsh` CLI
+（`DSH_ACP_SPAWN_PROFILE` 可覆盖 profile，默认 `headless` —— 它是**支持 prompt 位置参数**
+的那个；`web` 是服务端 profile，不接受 prompt 位置参数）。
+
 ## 许可证
 
 [MIT](LICENSE)

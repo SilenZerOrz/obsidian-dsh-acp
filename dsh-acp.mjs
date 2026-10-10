@@ -995,6 +995,9 @@ function createAgent() {
         // 同时出现在 history 与「当前 prompt」里，模型会看到两遍同一句话。
         const history = getHistory(params.sessionId);
         let proxyAssistantText = "";
+        // t58 A：统计本轮的工具帧（用于「有工具调用但无可见文本」时合成最小提示）
+        let proxyToolFrames = 0;
+        let proxyToolNames = [];
         let proxyResult;
         let proxyErrorText;
         try {
@@ -1018,6 +1021,16 @@ function createAgent() {
                   && u?.content?.type === "text"
                   && typeof u.content.text === "string") {
                   proxyAssistantText += u.content.text;
+                }
+                // t58 A：工具帧计数 —— tool_call(start) 与 tool_call_update(finish) 都算，
+                // 但同一 toolCallId 只记一次名称，避免同一工具被重复计入（start+finish 两帧）。
+                if (u?.sessionUpdate === "tool_call" || u?.sessionUpdate === "tool_call_update") {
+                  if (typeof u.toolCallId === "string" && !proxyToolNames.some((x) => x.id === u.toolCallId)) {
+                    proxyToolFrames += 1;
+                    proxyToolNames.push({ id: u.toolCallId, name: typeof u.title === "string" && u.title ? u.title : "(unnamed)" });
+                  } else if (typeof u.toolCallId !== "string") {
+                    proxyToolFrames += 1;
+                  }
                 }
               } catch { /* best-effort */ }
               if (!ctx?.client) return;
@@ -1058,6 +1071,33 @@ function createAgent() {
         }
         // 保持原语义：proxy 失败仍向上抛（客户端看到 end_turn error）
         if (proxyErrorText) throw new Error(proxyErrorText);
+
+        // t58 A（t57 建议 a）：一轮成功结束但「有工具调用、可见文本却近乎为空」时，
+        // 合成一条最小提示 —— 否则客户端只看到「工具卡片 + 空白」，观感像「工具没返回」
+        // （t56 实测该轮 6 个 text 帧合计仅 4 个空白字符）。
+        // ⚠️ 纯显示：不改协议、不改历史语义（归档仍用 proxyAssistantText，不含本提示）。
+        // 触发条件刻意收窄：① 无错误 ② 至少 1 个工具帧 ③ **去空白后没有任何可见文本**。
+        // ❗规格原文写的是「可见文本总长 < 10 字符」，但自测发现该阈值**过宽**：
+        //   带工具调用的正常短答（例如「好的，已完成。」= 6 个可见字符）也会被追加提示，
+        //   属误触正常轮次。按用户中断规则「触发条件过宽 → 停并收紧」已收紧为 === 0。
+        //   （=== 0 是「< 10」的严格子集，且精确对应该现象：t56 实测正文全为空白。）
+        {
+          const visibleLen = proxyAssistantText.replace(/\s+/g, "").length;
+          if (proxyToolFrames >= 1 && visibleLen === 0) {
+            const names = [...new Set(proxyToolNames.map((t) => t.name))].join("、");
+            const synth = `[已调用工具：${names || "(unnamed)"}（无文字输出）]`;
+            const synthId = `dsh-acp-synth-${Date.now()}`;
+            try {
+              await notifyUpdate(ctx.client, params.sessionId, {
+                sessionUpdate: "agent_message_chunk",
+                ...textChunk(synthId, synth),
+              });
+              process.stderr.write(`[dsh-acp] t58: synthesized notice for tool-only turn (tools=${names}; visibleLen=${visibleLen})\n`);
+            } catch (e) {
+              process.stderr.write(`[dsh-acp] t58 synth notify failed: ${e?.message ?? e}\n`);
+            }
+          }
+        }
         return proxyResult;
       }
 

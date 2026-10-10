@@ -41,6 +41,7 @@
     "README.md",
     "README.zh-CN.md",
     "README.ru.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

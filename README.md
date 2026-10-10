@@ -583,6 +583,31 @@ profile misconfigurations** (`headless-default-model-broken`,
 `headless-cordis-plugin-name-wrong`, `headless-redundant-settings-yaml`) with
 one-click copy-pasteable fix commands.
 
+## Obsidian agent-client integration (proxy vs spawn)
+
+To run this adapter inside Obsidian, add a **custom agent** in the Agent Client
+plugin settings. Two details matter and are easy to get wrong:
+
+1. **`customAgent.env` is an array of `{ key, value }` objects — not `"KEY=VALUE"` strings.**
+   Agent Client builds the child environment by reducing that array
+   (`env.reduce((acc, { key, value }) => …)`), so a plain string entry is ignored.
+2. The adapter picks its transport per prompt:
+   * **proxy** (recommended when a dsh web gateway is running) — forwards the turn to the
+     already-running gateway over HTTP/SSE, so one long-lived process serves the model;
+   * **spawn** (fallback) — starts its own `dsh --profile <profile> <prompt>` subprocess.
+
+Recommended `env` entries:
+
+| key | value | effect |
+|---|---|---|
+| `DSH_ACP_HTTP_GATEWAY_URL` | `http://127.0.0.1:3080` | points the adapter at the dsh web gateway |
+| `DSH_ACP_PROXY_MODE` | `true` | asks for the proxy transport |
+
+**If you configure neither**, the adapter uses **spawn (headless)**, which requires the
+`dsh` CLI to be installed on the system (`DSH_ACP_SPAWN_PROFILE` overrides the profile; it
+defaults to `headless`, which is the prompt-capable one — `web` is a server profile and
+cannot take a prompt positional).
+
 ## License
 
 [MIT](LICENSE)
