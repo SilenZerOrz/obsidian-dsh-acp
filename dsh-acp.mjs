@@ -902,10 +902,11 @@ function createAgent() {
         // t44: 必须在写入本轮 user 消息**之前**取历史——否则本轮 prompt 会
         // 同时出现在 history 与「当前 prompt」里，模型会看到两遍同一句话。
         const history = getHistory(params.sessionId);
-        try { recordMessage(session.id, "user", promptText); } catch {}
         let proxyAssistantText = "";
+        let proxyResult;
+        let proxyErrorText;
         try {
-          const proxyResult = await forwardPromptViaHttp({
+          proxyResult = await forwardPromptViaHttp({
             baseUrl,
             sessionId: params.sessionId,
             prompt: params.prompt,
@@ -945,17 +946,27 @@ function createAgent() {
               return await ctx.client.request(method, p);
             },
           });
-          // t44: 归档本轮助手回复（proxy 返回体只有 {stopReason,usage}，
-          // 正文来自上面 onUpdate 的累积）。若不归档，proxy 模式下 assistant
-          // 消息永不落库 → 下一轮 history 里没有它 → 仍然「多轮无记忆」。
-          try {
-            if (proxyAssistantText) recordMessage(session.id, "assistant", proxyAssistantText);
-          } catch { /* best-effort */ }
-          return proxyResult;
         } catch (e) {
+          // t48: 只**记录**错误文本，不再在此归档（归档统一挪到 finally）。
+          // t47 定位：此前归档语句位于 `return proxyResult` 之前，出错时控制流
+          // 直接跳到 catch → 归档**从未执行** → messages 只剩 user（roles=user,user）。
+          proxyErrorText = `[dsh-acp error] ${e?.message ?? String(e)}`;
           process.stderr.write(`[dsh-acp] proxy forward failed: ${e?.message ?? e}; client will see end_turn\n`);
-          throw e;
+        } finally {
+          // t48 单一归档点（A+B）：无论成功或失败都在此写 user + assistant。
+          // ① 只此一处（原 try 内与调用前的归档均已删除）→ 不会重复写
+          // ② 出错轮也落盘，assistant 文本带 `[dsh-acp error]` 前缀，便于下一轮
+          //    模型/用户知道上一轮失败过（而不是像 t47 那样只剩 user）
+          // ③ user 的归档放在这里是因为 history 已在上面**先**取好（防重复计数）
+          try { recordMessage(session.id, "user", promptText); } catch { /* best-effort */ }
+          try {
+            const assistantText = proxyErrorText ?? proxyAssistantText;
+            if (assistantText) recordMessage(session.id, "assistant", assistantText);
+          } catch { /* best-effort */ }
         }
+        // 保持原语义：proxy 失败仍向上抛（客户端看到 end_turn error）
+        if (proxyErrorText) throw new Error(proxyErrorText);
+        return proxyResult;
       }
 
       // P1.5 step 4: long-mode + mock-llm protocol test path. If long-runtime
