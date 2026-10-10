@@ -136,11 +136,39 @@ import { join, join as joinPath } from "node:path";
 
 const DSH_BIN = detectDshBinary();
 const DSH_SPAWN = resolveDshSpawnSpec(DSH_BIN);
-const DSH_PROFILE = process.env.DSH_PROFILE ?? "headless";
+/**
+ * t51：prompt-spawn 的目标 profile。
+ *
+ * ⚠️ **不读 `DSH_PROFILE`** —— 那是给 dsh CLI / 其他组件（见 index.mjs、http-gateway、
+ * doctor、runtime-switch）用的**外部**约定；dsh-acp 的 prompt-spawn 是**内部行为**，
+ * 必须自己决定用哪个 profile。
+ *
+ * 用户 2026-10-10 拍板三条原则：
+ *   ① 不读 DSH_PROFILE；
+ *   ② 默认 `headless`（**prompt-capable**：`web` 是服务端 profile，
+ *      `dsh --profile web "<prompt>"` 会带 `--json` 报 `unknown option '--json'`、
+ *      不带则报 `too many arguments. Expected 0 arguments but got 1` ——
+ *      同一缺陷两副面孔，且会导致 **LLM 从未真正跑起来 → 无内容可归档 →
+ *      表象为「多轮无记忆」**）；
+ *   ③ **不自动回退** —— 黑盒回退逻辑会引入难查的 bug；显式优先 + WARN 更稳。
+ *
+ * 覆盖方式：`DSH_ACP_SPAWN_PROFILE=<profile>`。
+ */
+const SPAWN_PROFILE = process.env.DSH_ACP_SPAWN_PROFILE || "headless";
+
+// 显式告知：DSH_PROFILE 存在且与 spawnProfile 不同 ⇒ 对 prompt-spawn 无效（不是错误，是 NOTE）。
+if (process.env.DSH_PROFILE && process.env.DSH_PROFILE !== SPAWN_PROFILE) {
+  process.stderr.write(
+    `[dsh-acp] NOTE: DSH_PROFILE=${process.env.DSH_PROFILE} ignored for ` +
+    `prompt-spawn; using spawnProfile=${SPAWN_PROFILE}. ` +
+    `Override with DSH_ACP_SPAWN_PROFILE.\n`,
+  );
+}
+
 const DSH_EXTRA_ARGS = (process.env.DSH_ARGS ?? "").split(" ").filter(Boolean);
 
 function dshBaseArgs() {
-  return ["--profile", DSH_PROFILE, ...DSH_EXTRA_ARGS];
+  return ["--profile", SPAWN_PROFILE, ...DSH_EXTRA_ARGS];
 }
 
 // ---- Logging -------------------------------------------------------------
@@ -293,7 +321,31 @@ function modelPatchArgs(model, provider) {
   return { file, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch {} } };
 }
 
-function runDsh(prompt, cwd, onChunk, signal, modelOverride, onFrame) {
+/**
+ * t50：`--json` 失败兜底。
+ *
+ * 背景（t49/t50 实测）：`hasHeadlessJson()` 现在会**真实试跑** `dsh --profile <p> --json --help`
+ * 并要求 exit 0 —— 该探测在多数环境返回 true；但**真实调用**是
+ * `dsh --profile <p> --json <prompt>`（带位置参数），在部分环境会被 dsh 以
+ * `error: unknown option '--json'` 拒绝。即「--help 能过」不等于「带 prompt 也能过」。
+ *
+ * 故此处兜底：当 dsh **因 --json 被拒**而失败时，**去掉 --json 重试一次**。
+ *
+ * ⚠️ 守卫很窄：只匹配 `unknown option '--json'` —— 这是 **参数解析阶段**的失败，
+ * 此时还没有任何模型输出被流式送出，故重试不会造成重复输出。
+ */
+async function runDsh(prompt, cwd, onChunk, signal, modelOverride, onFrame) {
+  try {
+    return await runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, false);
+  } catch (e) {
+    const msg = e && e.message ? String(e.message) : "";
+    if (!/unknown option '--json'/.test(msg)) throw e;
+    process.stderr.write("[dsh-acp] dsh rejected --json; retrying once without it\n");
+    return await runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, true);
+  }
+}
+
+function runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, forceNoJson = false) {
   // 0.3.0 工具帧修复 (Path A): when dsh supports `--json`, drive stdout
   // through createHeadlessParser + createUpdateTranslator and forward each
   // legacy-shaped session/update to `onFrame`. dsh < 0.1.7-rc.1 lacks the
@@ -303,7 +355,8 @@ function runDsh(prompt, cwd, onChunk, signal, modelOverride, onFrame) {
   // Env override `DSH_ACP_NO_HEADLESS_JSON=1` forces the plain-text path
   // even when --json is available (escape hatch for callers who want the
   // pre-0.3.0 behavior).
-  const useStructured = hasHeadlessJson() && !process.env.DSH_ACP_NO_HEADLESS_JSON;
+  // t50: forceNoJson 为 --json 被拒后的重试路径，强制走纯文本模式。
+  const useStructured = !forceNoJson && hasHeadlessJson() && !process.env.DSH_ACP_NO_HEADLESS_JSON;
   return new Promise((resolve, reject) => {
     const args = [...dshBaseArgs(), prompt];
     // When a per-session model is chosen (and differs from the default we
