@@ -249,7 +249,21 @@ function getHistory(sessionId) {
       .slice(-HISTORY_MAX)
       .filter((m) => m && typeof m.text === "string" && m.text.length > 0
         && (m.role === "user" || m.role === "assistant"))
-      .map((m) => ({ role: m.role, content: m.text }));
+      .map((m) => ({
+        role: m.role,
+        content: m.text,
+        // t46: 宿主 LlmRuntime.forAdapter() 对 **assistant** 条目会**无条件**取
+        // `message.source` 再读 `source.replayState`
+        //   （@deepseek-ai/dsh-llm/lib/index.js:2236-2241：
+        //      if (message.role !== "assistant") return message;
+        //      const source = message.source;
+        //      if (source.replayState === void 0) return message;  ← 缺 source 即在此抛）
+        // 缺 source ⇒ turn 2 崩溃「Cannot read properties of undefined (reading 'replayState')」。
+        // 最小充分结构：只要 source 是对象且**不带** replayState 即走 early-return 原样放行；
+        // host 自身的规范形状也是 { kind: "model", provider, model }——此处取最小子集 {kind:"model"}。
+        // user 条目不补：host 对非 assistant 立即 return，不需要该字段。
+        ...(m.role === "assistant" ? { source: { kind: "model" } } : {}),
+      }));
   } catch {
     return [];
   }
