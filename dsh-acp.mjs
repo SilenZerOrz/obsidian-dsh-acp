@@ -223,6 +223,38 @@ function resolveDshAcpDefaultModelId() {
   return "jl-token/gemini-2.5-pro"; // 805d20c: tool-capable 兜底
 }
 
+/** t44: per-session 历史上限（防 prompt 无界增长 / 防内存泄漏）。 */
+// NOTE (0.3.4 known gap): HISTORY_MAX caps COUNT (100), not LENGTH.
+// A single very long message can still blow the context window.
+// Token/char budget deferred to 0.3.4 (see 0.3.3-整合开发计划 §0.3.4 种子).
+const HISTORY_MAX = 100;
+
+/**
+ * t44 多轮记忆（第 1 层）：取某 session 的历史，供 proxy 转发时上行。
+ *
+ * ⚠️ 复用而非新建：`archive-store` 早已维护**持久**的 per-session 消息表
+ * （`recordMessage()` → `rec.messages.push({role,text,at})` + 写 DSH archive），
+ * 且 `getSession()` 已在 dsh-acp.mjs 顶部导入。故本函数只做「读取 + 裁剪 + 换形」，
+ * 不另建 `Map`——避免出现两份会互相漂移的消息存储（沿 t42「中间透传层」教训）。
+ * 追加与清理也由既有设施承担：追加=recordMessage，清理=deleteSession（删记录即清正）。
+ *
+ * 返回形状 `{role, content}[]`：`long-runtime` 的 `normalizeMessage` 接受的正是它。
+ * 只取最近 HISTORY_MAX 条（在**读取侧**设上限，等价于写侧设上限的效果）。
+ */
+function getHistory(sessionId) {
+  try {
+    const rec = getSession(sessionId);
+    const all = Array.isArray(rec?.messages) ? rec.messages : [];
+    return all
+      .slice(-HISTORY_MAX)
+      .filter((m) => m && typeof m.text === "string" && m.text.length > 0
+        && (m.role === "user" || m.role === "assistant"))
+      .map((m) => ({ role: m.role, content: m.text }));
+  } catch {
+    return [];
+  }
+}
+
 function splitModel(combo) {
   if (!combo || typeof combo !== "string") return { provider: DEFAULT_PROVIDER, model: undefined };
   const idx = combo.indexOf("/");
@@ -853,17 +885,34 @@ function createAgent() {
       if (globalThis.__DSH_ACP_PROXY_BASE_URL__) {
         const baseUrl = globalThis.__DSH_ACP_PROXY_BASE_URL__;
         process.stderr.write(`[dsh-acp] proxy forward session=${params.sessionId}\n`);
+        // t44: 必须在写入本轮 user 消息**之前**取历史——否则本轮 prompt 会
+        // 同时出现在 history 与「当前 prompt」里，模型会看到两遍同一句话。
+        const history = getHistory(params.sessionId);
         try { recordMessage(session.id, "user", promptText); } catch {}
+        let proxyAssistantText = "";
         try {
-          return await forwardPromptViaHttp({
+          const proxyResult = await forwardPromptViaHttp({
             baseUrl,
             sessionId: params.sessionId,
             prompt: params.prompt,
             model: session.model ?? undefined,
             temperature: typeof session.temperature === "number" ? session.temperature : undefined,
             reasoningEffort: session.reasoningEffort ?? undefined,
+            // t44 多轮记忆（第 1 层）：把 per-session history 交给 proxy 上行。
+            messages: history,
             signal: ctx.signal,
             onUpdate: async (method, p) => {
+              // t44: proxy 路径的返回体只有 {stopReason, usage}（无 text），
+              // 助手正文只经 sessionUpdate 事件到达 → 在此累积，供本轮结束后归档，
+              // 否则 proxy 模式的 assistant 消息永不落库，下一轮 history 里没有它。
+              try {
+                const u = p?.update;
+                if (u?.sessionUpdate === "agent_message_chunk"
+                  && u?.content?.type === "text"
+                  && typeof u.content.text === "string") {
+                  proxyAssistantText += u.content.text;
+                }
+              } catch { /* best-effort */ }
               if (!ctx?.client) return;
               try {
                 await ctx.client.notify(method, p);
@@ -882,6 +931,13 @@ function createAgent() {
               return await ctx.client.request(method, p);
             },
           });
+          // t44: 归档本轮助手回复（proxy 返回体只有 {stopReason,usage}，
+          // 正文来自上面 onUpdate 的累积）。若不归档，proxy 模式下 assistant
+          // 消息永不落库 → 下一轮 history 里没有它 → 仍然「多轮无记忆」。
+          try {
+            if (proxyAssistantText) recordMessage(session.id, "assistant", proxyAssistantText);
+          } catch { /* best-effort */ }
+          return proxyResult;
         } catch (e) {
           process.stderr.write(`[dsh-acp] proxy forward failed: ${e?.message ?? e}; client will see end_turn\n`);
           throw e;
