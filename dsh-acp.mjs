@@ -36,6 +36,16 @@ import {
   flushPersist,
   updateSessionMeta,
 } from "./archive-store.mjs";
+import {
+  isVisibleText,
+  toolOnlyFallbackText,
+  toolOnlyFallbackEnabled,
+  shouldSynthesizeFallback,
+  closingReplyNudgeEnabled,
+  closingReplyNudgeText,
+  withClosingReplyNudge,
+  withClosingReplyNudgeOnPrompt,
+} from "./lib/fallback-text.mjs";
 import { gcBeforeList, detectObsidianSessionsDirs, runGC } from "./gc.mjs";
 import { resolveRuntimeMode, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { detectDshBinary, resolveDshSpawnSpec } from "./doctor.mjs";
@@ -989,6 +999,8 @@ function createAgent() {
         // t58 A：统计本轮的工具帧（用于「有工具调用但无可见文本」时合成最小提示）
         let proxyToolFrames = 0;
         let proxyToolNames = [];
+        // 仅推理帧计数：用于「无工具、无正文、只推理」的样本日志（不触发合成）。
+        let proxyThoughtFrames = 0;
         let proxyResult;
         let proxyErrorText;
         try {
@@ -1012,6 +1024,9 @@ function createAgent() {
                   && u?.content?.type === "text"
                   && typeof u.content.text === "string") {
                   proxyAssistantText += u.content.text;
+                }
+                if (u?.sessionUpdate === "agent_thought_chunk") {
+                  proxyThoughtFrames += 1;
                 }
                 // t58 A：工具帧计数 —— tool_call(start) 与 tool_call_update(finish) 都算，
                 // 但同一 toolCallId 只记一次名称，避免同一工具被重复计入（start+finish 两帧）。
@@ -1075,18 +1090,24 @@ function createAgent() {
         {
           const visibleLen = proxyAssistantText.replace(/\s+/g, "").length;
           if (proxyToolFrames >= 1 && visibleLen === 0) {
-            const names = [...new Set(proxyToolNames.map((t) => t.name))].join("、");
-            const synth = `[已调用工具：${names || "(unnamed)"}（无文字输出）]`;
-            const synthId = `dsh-acp-synth-${Date.now()}`;
-            try {
-              await notifyUpdate(ctx.client, params.sessionId, {
-                sessionUpdate: "agent_message_chunk",
-                ...textChunk(synthId, synth),
-              });
-              process.stderr.write(`[dsh-acp] t58: synthesized notice for tool-only turn (tools=${names}; visibleLen=${visibleLen})\n`);
-            } catch (e) {
-              process.stderr.write(`[dsh-acp] t58 synth notify failed: ${e?.message ?? e}\n`);
+            // Layer A：工具轮无可见文本 → 合成一条显示用兜底文案（纯显示，不进历史）。
+            // 触发条件保持不变（工具帧 ≥1 且无可见文本）；开关默认 on。
+            if (toolOnlyFallbackEnabled(process.env)) {
+              const synth = toolOnlyFallbackText(proxyToolNames);
+              const synthId = `dsh-acp-synth-${Date.now()}`;
+              try {
+                await notifyUpdate(ctx.client, params.sessionId, {
+                  sessionUpdate: "agent_message_chunk",
+                  ...textChunk(synthId, synth),
+                });
+                process.stderr.write(`[dsh-acp] t58: synthesized fallback for tool-only turn (tools=${proxyToolNames.map((t) => t.name).join("、")}; visibleLen=${visibleLen})\n`);
+              } catch (e) {
+                process.stderr.write(`[dsh-acp] t58 synth notify failed: ${e?.message ?? e}\n`);
+              }
             }
+          } else if (proxyToolFrames === 0 && visibleLen === 0 && proxyThoughtFrames >= 1) {
+            // 仅推理帧、无工具、无正文 → 不合成（避免误触），仅记样本日志。
+            process.stderr.write(`[dsh-acp] tool-only fallback: reasoning-only turn (thought=${proxyThoughtFrames}, visibleLen=0)\n`);
           }
         }
         return proxyResult;
@@ -1157,6 +1178,12 @@ function createAgent() {
       if (logFile) console.log(`prompt session=${params.sessionId} cwd=${cwd} ${promptText.slice(0, 200)}`);
       const messageId = `msg-${randomUUID()}`;
       let receivedChunks = false;
+      // Layer A（spawn）：单独跟踪"文本"与"工具"帧，修复此前工具帧被误当文本的 bug：
+      // 旧代码在 onFrame 里无条件置 receivedChunks=true → 只有工具帧时 L1220 兜底
+      // 不触发 → 客户端只看到工具卡片、无收尾文本。
+      let visibleText = "";
+      let spawnToolFrames = 0;
+      const spawnToolNames = [];
       // Archive the user turn (function 3: write back to DSH archive).
       try { recordMessage(session.id, "user", promptText); } catch {}
       try {
@@ -1170,6 +1197,7 @@ function createAgent() {
           cwd,
           (chunk) => {
             receivedChunks = true;
+            visibleText += chunk;
             notifyUpdate(ctx.client, params.sessionId, {
               sessionUpdate: "agent_message_chunk",
               ...textChunk(messageId, chunk),
@@ -1183,6 +1211,18 @@ function createAgent() {
             // the legacy SSE channel already digests (see acp-tool-translation
             // spec for the official→legacy mapping this inherits).
             receivedChunks = true;
+            if (frame?.sessionUpdate === "agent_message_chunk"
+              && frame?.content?.type === "text"
+              && typeof frame.content.text === "string") {
+              visibleText += frame.content.text;
+            } else if (frame?.sessionUpdate === "tool_call" || frame?.sessionUpdate === "tool_call_update") {
+              if (typeof frame.toolCallId === "string" && !spawnToolNames.some((x) => x.id === frame.toolCallId)) {
+                spawnToolFrames += 1;
+                spawnToolNames.push({ id: frame.toolCallId, name: typeof frame.title === "string" && frame.title ? frame.title : "(unnamed)" });
+              } else if (typeof frame.toolCallId !== "string") {
+                spawnToolFrames += 1;
+              }
+            }
             notifyUpdate(ctx.client, params.sessionId, frame).catch(
               (e) => console.log(`notify error: ${e}`),
             );
@@ -1196,7 +1236,15 @@ function createAgent() {
           const srec = getSession(session.id);
           if (srec && shouldRefreshSummary(srec)) regenerateSummary(srec);
         } catch { /* best-effort */ }
-        if (!receivedChunks) {
+        if (shouldSynthesizeFallback({ visibleText, toolFrames: spawnToolFrames })
+          && toolOnlyFallbackEnabled(process.env)) {
+          // Layer A（spawn）：工具轮无可见文本 → 合成显示用兜底（纯显示，不进历史）。
+          const synthId = `dsh-acp-synth-${Date.now()}`;
+          await notifyUpdate(ctx.client, params.sessionId, {
+            sessionUpdate: "agent_message_chunk",
+            ...textChunk(synthId, toolOnlyFallbackText(spawnToolNames)),
+          });
+        } else if (!receivedChunks) {
           await notifyUpdate(ctx.client, params.sessionId, {
             sessionUpdate: "agent_message_chunk",
             ...textChunk(messageId, finalText),
