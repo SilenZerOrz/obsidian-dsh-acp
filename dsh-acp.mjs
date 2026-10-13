@@ -1003,6 +1003,16 @@ function createAgent() {
         let proxyThoughtFrames = 0;
         let proxyResult;
         let proxyErrorText;
+        // Layer B（默认 off）：可选地把「调完工具要补收尾句」的提示前置为 system 消息。
+        // 默认关闭——每轮注入会改变 prompt 前缀 → 破坏缓存。仅 DSH_ACP_CLOSING_REPLY_NUDGE=1 启用。
+        const outboundMessages = withClosingReplyNudge(
+          history,
+          closingReplyNudgeEnabled(process.env),
+          closingReplyNudgeText(process.env),
+        );
+        if (closingReplyNudgeEnabled(process.env)) {
+          process.stderr.write("[dsh-acp] Layer B: closing-reply nudge injected (proxy)\n");
+        }
         try {
           proxyResult = await forwardPromptViaHttp({
             baseUrl,
@@ -1012,7 +1022,8 @@ function createAgent() {
             temperature: typeof session.temperature === "number" ? session.temperature : undefined,
             reasoningEffort: session.reasoningEffort ?? undefined,
             // t44 多轮记忆（第 1 层）：把 per-session history 交给 proxy 上行。
-            messages: history,
+            // Layer B：outboundMessages 可能含前置 system（未启用时 === history 原数组）。
+            messages: outboundMessages,
             signal: ctx.signal,
             onUpdate: async (method, p) => {
               // t44: proxy 路径的返回体只有 {stopReason, usage}（无 text），
@@ -1192,8 +1203,15 @@ function createAgent() {
         // path (onChunk) is the legacy fallback for dsh < 0.1.7-rc.1 — see
         // v2 plan §5.5. We pass BOTH callbacks: runDsh picks the structured
         // path and ignores onChunk when --json is available.
-        const output = await runDsh(
+        // Layer B（默认 off）：spawn 无 system 通道 → 把提示前置到 prompt 文本。
+        // 归档仍用干净的 promptText（提示不进历史、不进用户可见轮次）。
+        const promptForDsh = withClosingReplyNudgeOnPrompt(
           promptText,
+          closingReplyNudgeEnabled(process.env),
+          closingReplyNudgeText(process.env),
+        );
+        const output = await runDsh(
+          promptForDsh,
           cwd,
           (chunk) => {
             receivedChunks = true;
