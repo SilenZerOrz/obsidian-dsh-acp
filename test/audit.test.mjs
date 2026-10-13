@@ -1,6 +1,9 @@
 // test/audit.test.mjs — audit.mjs 单元测试
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   CHECK_META, CHECK_ORDER, BLOCKING_CODES,
@@ -83,4 +86,41 @@ test("audit: readAgentDefaultModel returns provider=null on missing dir", () => 
   const r = readAgentDefaultModel("/this/path/does/not/exist");
   assert.equal(r.provider, null);
   assert.equal(r.model, null);
+});
+
+test("audit: readAgentDefaultModel parses cordis list-item section (- id: agent-default-model)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cordis-list-"));
+  writeFileSync(join(dir, "cordis.patch.yml"), [
+    "- id: llm-deepseek",
+    "  name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
+    "  config:",
+    "    baseURL: http://x/v1",
+    "- id: agent-default-model",
+    "  name: '@deepseek-ai/dsh-agent-default-model'",
+    "  config:",
+    "    provider: jl-token",
+    "    model: gemini-2.5-pro",
+    "- id: llm-next",
+    "  config:",
+    "    provider: OTHER",
+    "",
+  ].join("\n"));
+  const r = readAgentDefaultModel(dir);
+  assert.equal(r.provider, "jl-token");
+  assert.equal(r.model, "gemini-2.5-pro");
+});
+
+test("audit: readAgentDefaultModel parses nested-key section (agent-default-model:)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cordis-nested-"));
+  writeFileSync(join(dir, "cordis.patch.yml"), [
+    "agent-default-model:",
+    "  provider: qwen",
+    "  model: Qwen3.8",
+    "other:",
+    "  provider: nope",
+    "",
+  ].join("\n"));
+  const r = readAgentDefaultModel(dir);
+  assert.equal(r.provider, "qwen");
+  assert.equal(r.model, "Qwen3.8");
 });
