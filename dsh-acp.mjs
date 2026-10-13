@@ -46,6 +46,7 @@ import { readProfileDefaultModel } from "./lib/http-gateway.mjs";
 import { PERMISSION_MODES } from "./lib/permission-gate.mjs";
 import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
+import { splitModel, DEFAULT_PROVIDER } from "./lib/split-model.mjs";
 import {
   probeDshWebGateway,
   forwardPromptViaHttp,
@@ -264,10 +265,7 @@ if (logDir) {
 // is missing its provider part. Mirrors the headless profile's `agent-default-model`.
 // t38: 不再兜硬编码 "jl-token" —— env 缺失时为 null，交由 gateway/profile 决定，
 // 避免与 profile 实际注册的 provider 名错配（NO_ADAPTER → 静默 cancelled）。
-const DEFAULT_PROVIDER =
-  process.env.DSH_ACP_DEFAULT_PROVIDER ||
-  process.env.DSH_ACP_DEFAULT_MODEL?.split("/")[0] ||
-  null;
+// P3.2 C3: DEFAULT_PROVIDER + splitModel 提取到 lib/split-model.mjs（unit test 用）。
 
 /**
  * Split a `provider/model` combination (the flattened value we store on the
@@ -332,13 +330,6 @@ function getHistory(sessionId) {
   } catch {
     return [];
   }
-}
-
-function splitModel(combo) {
-  if (!combo || typeof combo !== "string") return { provider: DEFAULT_PROVIDER, model: undefined };
-  const idx = combo.indexOf("/");
-  if (idx === -1) return { provider: DEFAULT_PROVIDER, model: combo };
-  return { provider: combo.slice(0, idx), model: combo.slice(idx + 1) };
 }
 
 function modelPatchArgs(model, provider) {
