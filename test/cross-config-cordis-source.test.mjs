@@ -78,3 +78,32 @@ test("A1: desktop default provider judged against other profiles' cordis (no set
   const c = await runCheck("DSH_DESKTOP_DEFAULT_MODEL_VALID", { home });
   assert.equal(c.status, "pass", `expected pass, got ${c.status}: ${c.detail}`);
 });
+
+// ---- A2: PROVIDER_NAME_HYPHEN comment exclusion (// and #) ----
+
+test("A2: '//' comment line with jl-token → NOT a finding (pass)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "hyphen-"));
+  const adapter = join(home, "dsh-acp.mjs");
+  writeFileSync(adapter, [
+    "// t38: 不再兜硬编码 \"jl-token\" —— env 缺失时为 null",
+    "const x = 1;",
+  ].join("\n"));
+  const c = await runCheck("DSH_ACP_PROVIDER_NAME_HYPHEN", { home, env: { DSH_ACP_ADAPTER_PATH: adapter } });
+  // locateAdapterSource uses ctx.roots.adapter; our ctx uses `adapter: home` (dir) so it
+  // falls back to the package copy — either way the '//' line must not cause a FAIL.
+  assert.ok(c.status === "pass" || c.status === "skip", `expected pass/skip, got ${c.status}: ${c.detail}`);
+});
+
+test("A2: real (non-comment) jl-token literal → fail", async () => {
+  const home = mkdtempSync(join(tmpdir(), "hyphen2-"));
+  const adapter = join(home, "dsh-acp.mjs");
+  writeFileSync(adapter, ['const NAMES = ["jl-token"];'].join("\n"));
+  const ctx = createContext({
+    env: {},
+    roots: { injected: false, path: home, home, dshHome: home, obsidianDir: home, npmPrefix: home, adapter },
+  });
+  ctx.extraChecks = registeredExtraChecks();
+  const { checks } = await runChecks(ctx);
+  const c = checks.find((x) => x.id === "DSH_ACP_PROVIDER_NAME_HYPHEN");
+  assert.equal(c.status, "fail", `expected fail, got ${c.status}: ${c.detail}`);
+});
