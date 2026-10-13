@@ -1466,7 +1466,33 @@ Environment:
 `);
   process.exit(0);
 } else if (process.argv[2] === "doctor") {
-  // 环境自查（self-check kernel，经 lib/env-fix.mjs 单一门面）。
+  const argv = process.argv.slice(3);
+  const wantRepair = argv.includes("--repair");
+  const wantApply = argv.includes("--apply") && !argv.includes("--dry-run");
+
+  if (wantRepair) {
+    // 一键修复（self-check 全量）：默认预览（零写盘）；--apply 才落盘（写前自动备份）。
+    try {
+      const { auditAll, formatText, awaitPending } = await import("./lib/env-fix.mjs");
+      const { writeSync } = await import("node:fs");
+      const mode = wantApply ? "fix" : "dry-run";
+      const report = await auditAll({ mode, execute: wantApply, executeExternal: wantApply && argv.includes("--yes"), plan: true });
+      const lines = [formatText(report)];
+      lines.push("");
+      lines.push(wantApply
+        ? (report.mode === "error" ? "❌ 修复中止（FIXTURE_ESCAPE）" : "✅ 修复完成（已备份被改文件至 <file>.bak.<ts>）")
+        : "以上为预览（fixable 项见 Actions/plan 小节）。加 --apply 落盘；外部命令需再加 --yes。");
+      writeSync(1, lines.join("\n") + "\n");
+      if (typeof awaitPending === "function") await awaitPending(200);
+      process.exit(report.mode === "error" ? 2 : 0);
+    } catch (e) {
+      const { writeSync } = await import("node:fs");
+      writeSync(2, `一键修复不可用[${e?.code ?? "?"}]：${e?.message ?? e}\n`);
+      process.exit(2);
+    }
+  }
+
+  // 默认：环境自查（self-check kernel，经 lib/env-fix.mjs 单一门面）。
   // 只读报告模式；kernel 缺失时降级为提示，绝不阻断 doctor 本体。
   try {
     const { auditAll, formatText, awaitPending } = await import("./lib/env-fix.mjs");
@@ -1482,7 +1508,7 @@ Environment:
     } catch {}
   }
   const { runDoctorCli } = await import("./doctor.mjs");
-  await runDoctorCli(process.argv.slice(3));
+  await runDoctorCli(argv);
 } else if (process.argv[2] === "import") {
   const { runImportCli } = await import("./import-session.mjs");
   await runImportCli(process.argv.slice(3));
