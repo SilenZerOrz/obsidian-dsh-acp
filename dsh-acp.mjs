@@ -1466,6 +1466,21 @@ Environment:
 `);
   process.exit(0);
 } else if (process.argv[2] === "doctor") {
+  // 环境自查（self-check kernel，经 lib/env-fix.mjs 单一门面）。
+  // 只读报告模式；kernel 缺失时降级为提示，绝不阻断 doctor 本体。
+  try {
+    const { auditAll, formatText, awaitPending } = await import("./lib/env-fix.mjs");
+    const { writeSync } = await import("node:fs");
+    const report = await auditAll({ mode: "report", plan: false });
+    // 同步写入 fd 1：doctor.mjs 结尾会 process.exit()，异步 stdout 管道写会被截断。
+    writeSync(1, formatText(report) + "\n");
+    if (typeof awaitPending === "function") await awaitPending(200);
+  } catch (e) {
+    try {
+      const { writeSync } = await import("node:fs");
+      writeSync(2, `self-check 不可用（已降级）[${e?.code ?? "?"}]：${e?.message ?? e}\n`);
+    } catch {}
+  }
   const { runDoctorCli } = await import("./doctor.mjs");
   await runDoctorCli(process.argv.slice(3));
 } else if (process.argv[2] === "import") {

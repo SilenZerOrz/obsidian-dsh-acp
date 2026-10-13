@@ -1063,7 +1063,13 @@ export async function runDoctorCli(argv = process.argv.slice(3)) {
   process.exit(issues.length === 0 ? 0 : 1);
 }
 
-// 直接以 `dsh-acp doctor` 运行时走 CLI
-if (process.argv[1] && /dsh-acp\.mjs$/.test(process.argv[1]) && process.argv[2] === "doctor") {
+// 直接以 `dsh-acp doctor`（或 node doctor.mjs doctor）运行时走 CLI。
+// 注意：仅当本模块是入口时自执行；被 dsh-acp.mjs 静态 import 时不得自执行
+// （否则会在 import 阶段抢先 runDoctorCli + process.exit，跳过 dsh-acp.mjs
+//  的 doctor 分支——那里先跑 self-check kernel）。
+const __isEntryModule = (() => {
+  try { return fileURLToPath(import.meta.url) === process.argv[1]; } catch { return false; }
+})();
+if (__isEntryModule && process.argv[2] === "doctor") {
   await runDoctorCli();
 }
