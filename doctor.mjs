@@ -130,6 +130,39 @@ export function getDshVersion() {
   } catch { return null; }
 }
 
+/** 5 个核心 @deepseek-ai/dsh-* 包名。 */
+export const DSH_CORE_PACKAGES = Object.freeze([
+  "@deepseek-ai/dsh-base",
+  "@deepseek-ai/dsh-headless",
+  "@deepseek-ai/dsh-llm",
+  "@deepseek-ai/dsh-agent-loop",
+  "@deepseek-ai/dsh-acp",
+]);
+
+/** 兜底 pin（detect 不到运行版本时）。这些包的 dist-tags.latest 指向旧版，绝不能裸装。 */
+export const DSH_CORE_MIN_PIN = "0.2.1-alpha.1";
+
+/**
+ * 探测「核心包 pin 目标版本」= 运行中的 dsh 版本（干净 semver，去 v 前缀）。
+ * 探测失败回退 DSH_CORE_MIN_PIN。
+ *
+ * 为什么必须 pin：上游 @deepseek-ai/dsh-* 的 npm dist-tags.latest 是**旧版**
+ * （实测 dsh-base/headless/llm latest=0.0.1-rc.1、agent-loop latest=0.1.0-rc.6，
+ * 而 versions 已到 0.2.1-alpha.2）。`npm i <pkg>` 不带版本会静默装成这些远古版本
+ * → headless profile 起不来。故所有 install 提示必须逐包 pin。
+ */
+export function detectCorePinVersion() {
+  const raw = getDshVersion();
+  const m = raw && raw.match(/(\d+\.\d+\.\d+(?:-[\w.]+)?)/);
+  return m ? m[1] : DSH_CORE_MIN_PIN;
+}
+
+/** 生成「5 个核心包 @ <ver>」的逐包 pin 字符串（用于 install 提示）。 */
+export function pinnedCorePackages(ver = DSH_CORE_MIN_PIN) {
+  const v = ver || DSH_CORE_MIN_PIN;
+  return DSH_CORE_PACKAGES.map((p) => `${p}@${v}`).join(" ");
+}
+
 /**
  * 从 dsh 运行错误消息解析「缺凭据」问题，返回修复指引。
  * 兼容 dsh 0.1.1-rc.2 与 0.1.2-alpha 的 MISSING_CREDENTIAL 报错格式：
@@ -238,6 +271,9 @@ export function diagnoseHeadlessProfile() {
   // 定位 headless profile 目录
   const dshHome = process.env.DSH_HOME || join(homedir(), ".dsh");
   const profileDir = process.env.DSH_ACP_PROFILE_DIR || join(dshHome, "profiles", "headless");
+  // 5 个核心 @deepseek-ai/dsh-* 的 pin 目标版本 = 运行中的 dsh 版本（detect 不到时用兜底常量）。
+  // 必须 pin：这些包的 npm dist-tags.latest 指向旧版（见 pinnedCorePackages 注释）。
+  const dshVer = detectCorePinVersion();
   const cordisYml = join(profileDir, "cordis.patch.yml");
   const pkgJson = join(profileDir, "package.json");
   const wsYaml = join(profileDir, "pnpm-workspace.yaml");
@@ -253,7 +289,10 @@ export function diagnoseHeadlessProfile() {
         "# 让 dsh-acp 触发安装（首次运行会自动 install + pnpm install）",
         "node dsh-acp.mjs",
         "# 或手动（首次）",
-        "mkdir -p ~/.dsh/profiles && cd ~/.dsh/profiles && npm init -y && npm i @deepseek-ai/dsh-base @deepseek-ai/dsh-headless @deepseek-ai/dsh-llm @deepseek-ai/dsh-agent-loop @deepseek-ai/dsh-acp@0.1.7-rc.1",
+        `mkdir -p ~/.dsh/profiles && cd ~/.dsh/profiles && npm init -y && npm i ${pinnedCorePackages(dshVer)}`,
+        "# ⚠️ 必须显式 pin 每个包：@deepseek-ai/dsh-* 的 npm dist-tags.latest 指向旧版",
+        "#    （dsh-base/headless/llm latest=0.0.1-rc.1、agent-loop latest=0.1.0-rc.6），",
+        "#    裸装会静默装成远古版本。pin 到当前 dsh 版本。",
       ],
     });
     return issues; // 没目录的话下面 4 项无意义
@@ -321,9 +360,9 @@ export function diagnoseHeadlessProfile() {
         fix: [
           "# 进 headless profile 目录",
           `cd ${profileDir}`,
-          "# 装齐 5 个核心包（pin 到当前 dsh 版本，避免 next dist-tag 解析失败）",
-          `pnpm add -D ${required.join("@0.1.7-rc.1 ")}@0.1.7-rc.1`,
-          "# 不锁版本也可，但 pnpm 解析 0.1.7-rc.1 时仍需要 overrides 段（见下一项）",
+          "# 装齐 5 个核心包（每个都显式 pin 到当前 dsh 版本）",
+          `pnpm add -D ${pinnedCorePackages(dshVer)}`,
+          "# ⚠️ 必须 pin：@deepseek-ai/dsh-* 的 dist-tags.latest 指向旧版，裸装会装成远古版本",
         ],
       });
     }
@@ -336,7 +375,8 @@ export function diagnoseHeadlessProfile() {
       fix: [
         `cd ${profileDir}`,
         "npm init -y",
-        `pnpm add -D @deepseek-ai/dsh-base @deepseek-ai/dsh-headless @deepseek-ai/dsh-llm @deepseek-ai/dsh-agent-loop @deepseek-ai/dsh-acp@0.1.7-rc.1`,
+        `pnpm add -D ${pinnedCorePackages(dshVer)}`,
+        "# ⚠️ 每个包都显式 pin（dist-tags.latest 指向旧版，裸装会装成远古版本）",
       ],
     });
   }
@@ -369,7 +409,7 @@ export function diagnoseHeadlessProfile() {
       file: wsYaml,
       fix: [
         "# 关键段：packages: ['.'], nodeLinker: hoisted, autoInstallPeers: false",
-        "# + 22 个 @deepseek-ai/dsh-* overrides (pin 到 0.1.7-rc.1)",
+        `# + 22 个 @deepseek-ai/dsh-* overrides (pin 到 ${dshVer})`,
         "# + 5 个 allowBuilds (dsh-subprocess-local, @google/genai, koffi, node-pty, protobufjs)",
         "# 参考 ~/.dsh/profiles/web/pnpm-workspace.yaml 全文复制",
       ],
