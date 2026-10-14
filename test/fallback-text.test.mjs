@@ -25,13 +25,16 @@ test("dedupeToolNames: dedupes + unnamed fallback", () => {
   assert.deepEqual(dedupeToolNames(["", "  "]), ["(unnamed)"]);
 });
 
-test("toolOnlyFallbackText: short form, deduped, marks synthesized", () => {
+test("toolOnlyFallbackText: truthful form (A3/H1), deduped", () => {
   const s = toolOnlyFallbackText(["obsidian_memory_read", "obsidian_memory_search"]);
-  assert.equal(s, "[已调用工具：obsidian_memory_read、obsidian_memory_search，无文字输出]");
-  assert.equal(toolOnlyFallbackText(["a", "a"]), "[已调用工具：a，无文字输出]");
-  assert.equal(toolOnlyFallbackText([]), "[已调用工具：无文字输出]");
+  // A3 red-line: must NOT claim the tool "已调用/已执行" — proxy/long has no executor.
+  assert.equal(/已调用|已执行/.test(s), false, "文案不得声称工具已执行（proxy 无执行器）");
+  assert.match(s, /模型请求调用工具/);
+  assert.match(s, /obsidian_memory_read、obsidian_memory_search/);
+  assert.match(toolOnlyFallbackText(["a", "a"]), /请求调用工具：a/);
+  assert.match(toolOnlyFallbackText([]), /未产出文字/);
   // accepts {name} objects (proxy toolNames shape)
-  assert.equal(toolOnlyFallbackText([{ name: "X" }, { name: "X" }]), "[已调用工具：X，无文字输出]");
+  assert.match(toolOnlyFallbackText([{ name: "X" }, { name: "X" }]), /请求调用工具：X/);
 });
 
 test("toolOnlyFallbackEnabled: default on, opt-out values off", () => {
