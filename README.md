@@ -154,15 +154,27 @@ dsh-version-specific internal API.
 
 Reasoning models sometimes call a tool but emit **no user-facing text** (the
 whole answer stayed in the reasoning stream). Without help the client shows only
-a tool card and a blank reply. To avoid that, `dsh-acp` synthesizes a minimal
+a tool card and a blank reply. To avoid that, `dsh-acp` synthesizes a truthful
 notice so the turn always shows something:
 
 ```
-[已调用工具：<tool names>，无文字输出]
+[模型请求调用工具：<tool names>；当前运行模式不执行工具，本轮无结果与文字]
 ```
 
 This is **display-only** — it does not change the protocol or the archived
 history. It can be disabled with `DSH_ACP_TOOL_ONLY_FALLBACK=off`.
+
+**Proxy/long tool gate (default OFF).** The proxy/long runtime path makes a
+single `ctx.llm.stream()` call and has **no tool executor**. Exposing tool
+schemas there let the model request tools that never ran, ending the turn with
+no text. So tool schemas are **not exposed** on that path by default:
+
+```bash
+DSH_ACP_LONG_TOOLS=1 dsh-acp ...   # opt in (set in the dsh web process env)
+```
+
+Needs to run tools? Use the **spawn** path (unset `DSH_ACP_HTTP_GATEWAY_URL`,
+set `DSH_ACP_PROXY_MODE=false`) — the real `dsh` backend has its own agent loop.
 
 **Optional closing-reply nudge (default OFF).** Enable it to steer the model to
 always append a closing sentence after tool use:
@@ -178,6 +190,11 @@ model-visible only — never shown as user text.
 > ⚠️ Enabling this changes the prompt prefix on tool turns → **prompt-cache
 > miss** → higher cost. Keep it OFF unless you understand the trade-off.
 > Override the wording with `DSH_ACP_CLOSING_REPLY_NUDGE_TEXT`.
+
+> **Memory tools on the proxy path are not executed** (no executor), and the
+> headless profile does not load `ui-obsidian-memory`. Same-session recall
+> works (session history); cross-session memory does not. See
+> `docs/known-gaps.md`.
 
 ### Session cleanup (`gc`, automatic)
 

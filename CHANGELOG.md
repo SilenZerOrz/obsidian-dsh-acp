@@ -2,6 +2,13 @@
 
 ## 0.3.4
 
+### Breaking
+- **proxy/long 路径默认不再向模型暴露工具 schema**（`DSH_ACP_LONG_TOOLS=1` 才开启，
+  须设在 **dsh web 进程环境**）。原因：该路径只调用一次 `ctx.llm.stream()`、**没有工具
+  执行器**；暴露 schema 会让模型请求根本不会执行的工具、以 `finishReason=tool-calls`
+  结束且无正文。**需要工具执行请走 spawn 路径**（去掉 `DSH_ACP_HTTP_GATEWAY_URL`、
+  设 `DSH_ACP_PROXY_MODE=false`，用扁平 id `jl-token/<model>`）。
+
 ### Fixed
 - **chunk-mapper（C1）**：块结束快照在增量 delta 已发送时跳过，消除整段重复。
 - **long-runtime（C2）**：provider 缺失时给出可读报错，不再出现无意义的 `"default"`。
@@ -10,12 +17,14 @@
   `.imported`（legacy 导入），而 dsh-acp 的 `loadProviderCatalog()` 仍读该路径 →
   读空 → 回退 4 个硬编码模型（缺 `DeepSeek-V4.1-Flash`）。改为**优先读
   `<profileDir>/cordis.patch.yml`**（与 dsh web UI 同源）+ 多级 fallback。
-- **self-check 误报**：`doctor` 的 Obsidian 探测漏了 Shared-Plugins 目录与
-  obsidian.json vault 注册表；cordis 列表段（`- id: <section>`）YAML 解析失败；
-  `customAgents` 实际是 list 而非 object。
-- **工具轮无可见文本（Layer A）**：模型只调工具、不产出收尾文字时，合成
-  `[已调用工具：<names>，无文字输出]`（纯显示，不改协议/历史）。同时修复 spawn
-  路径 `receivedChunks` 把工具帧误当文本、导致兜底不触发的 bug。
+- **self-check 误报（A1/A2）**：Obsidian 探测漏了 Shared-Plugins 目录与 obsidian.json
+  vault 注册表；cordis 列表段（`- id: <section>`）YAML 解析失败；`customAgents` 实际是
+  list 而非 object；3 个 cross-config check 基准由 `settings.yaml` 改为 `cordis.patch.yml`；
+  `PROVIDER_NAME_HYPHEN` 注释排除覆盖 `//`。
+- **工具轮无可见文本（Layer A）**：模型只调工具、不产出收尾文字时，合成**如实**提示
+  `[模型请求调用工具：<names>；当前运行模式不执行工具，本轮无结果与文字]`（纯显示，
+  不改协议/历史；**不再声称"已调用"**）。同时修复 spawn 路径 `receivedChunks`
+  把工具帧误当文本、导致兜底不触发的 bug。
 
 ### Added
 - **self-check kernel**：`lib/selfcheck/*` 16 个固定检查 + 可插拔扩展（cross-config
@@ -23,16 +32,22 @@
   写前备份 / 幂等去重）。
 - **CLI `dsh-acp doctor --repair [--apply]`**：自检全量修复；默认**预览（零写盘）**，
   `--apply` 才落盘（每个文件先备份 `.bak.<ts>`）。legacy `doctor --fix <item>` 不变。
+- **`DSH_ACP_LONG_TOOLS`**（opt-in，默认 **off**）：proxy 路径恢复暴露工具 schema（当前
+  仍无执行器，仅调试用）。
 - **`DSH_ACP_CLOSING_REPLY_NUDGE`**（opt-in，默认 **off**）：工具轮后引导模型补收尾句；
   因每轮会改 prompt 前缀、破坏缓存，故默认关闭。文案可用
   `DSH_ACP_CLOSING_REPLY_NUDGE_TEXT` 覆盖。
 - **`DSH_ACP_TOOL_ONLY_FALLBACK`**（默认 on）：关闭 Layer A 兜底显示。
-- `docs/SELFCHECK.md`：self-check 架构参考。
+- `docs/SELFCHECK.md` / `docs/releasing.md` / `docs/known-gaps.md`。
 
 ### Docs
-- README 三语（en / zh-CN / ru）重写：语言切换行 + badges + 标准 OSS 章节结构；
-  新增「工具轮无文字兜底」章节。
+- README 三语（en / zh-CN / ru）：语言切换行 + badges + 标准 OSS 章节结构；「工具轮
+  无文字兜底」章节更新为如实文案 + `DSH_ACP_LONG_TOOLS` 门控说明。
 - `docs/规范/发布SOP.md` / `docs/规范/分支与版本规范.md` 更新（本地）。
+
+### Known gaps
+- proxy 与 spawn 下 memory 工具均不执行；跨 session 记忆不可用（实测 0/3 答对）。
+  详见 `docs/known-gaps.md`。
 
 ### Notes
 - 两处 **upstream deviation**（源自 `github.com/SilenZerOrz/obsidian-dsh-acp@windows-support-032`）：

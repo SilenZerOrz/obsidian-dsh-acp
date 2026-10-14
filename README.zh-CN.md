@@ -139,14 +139,25 @@ profile 健康度），不依赖任何特定 dsh 版本的内部 API。
 ### 工具轮无文字兜底
 
 推理型模型有时只调工具、不产出面向用户的文字（答案全留在了推理流里）。若不处理，
-客户端只会看到一张工具卡片 + 空白回复。为此 `dsh-acp` 会合成一条最小提示，保证
+客户端只会看到一张工具卡片 + 空白回复。为此 `dsh-acp` 会合成一条**如实**提示，保证
 这一轮**始终有可见输出**：
 
 ```
-[已调用工具：<工具名>，无文字输出]
+[模型请求调用工具：<工具名>；当前运行模式不执行工具，本轮无结果与文字]
 ```
 
 这是**纯显示**——不改协议、不改归档历史。可用 `DSH_ACP_TOOL_ONLY_FALLBACK=off` 关闭。
+
+**proxy/long 工具门控（默认关）。** proxy/long 运行时路径只调用一次
+`ctx.llm.stream()`，**没有工具执行器**。在该路径暴露工具 schema 会让模型请求根本
+不会执行的工具、然后无正文结束。因此该路径**默认不暴露工具**：
+
+```bash
+DSH_ACP_LONG_TOOLS=1 dsh-acp ...   # 开启（须设在 dsh web 进程环境）
+```
+
+**需要真正执行工具**？走 **spawn** 路径（去掉 `DSH_ACP_HTTP_GATEWAY_URL`、设
+`DSH_ACP_PROXY_MODE=false`）—— 真 `dsh` 后端自带 agent loop。
 
 **可选的收尾句提示（默认关）。** 开启后引导模型在调工具后补一句收尾：
 
@@ -159,6 +170,10 @@ DSH_ACP_CLOSING_REPLY_NUDGE=1 dsh-acp ...
 
 > ⚠️ 开启后每个工具轮都会改变 prompt 前缀 → **prompt 缓存失效** → 成本上升。
 > 除非清楚取舍，否则保持默认关闭。文案可用 `DSH_ACP_CLOSING_REPLY_NUDGE_TEXT` 覆盖。
+
+> **proxy 路径下记忆工具不执行**（无执行器），且 headless profile 未加载
+> `ui-obsidian-memory`。同 session 回忆正常（靠会话历史）；跨 session 记忆不可用。
+> 详见 `docs/known-gaps.md`。
 
 ### 会话清理（`gc`，自动）
 
