@@ -54,6 +54,13 @@
   （4 用例，已登记进 `test:unit`）。
 - `docs/SELFCHECK.md` / `docs/releasing.md` / `docs/known-gaps.md`。
 
+### Changed
+
+- **测试资产分层**：`npm run test:unit` 不再包含依赖 `test/fixtures/` 的测试
+  （`test/cwd-validator.test.mjs` 移至新建的 `npm run test:local`；
+  `test/headless-json-parser.test.mjs` 的 fixture 已内联为常量）。
+  依据 `docs/规范/测试资产规范.md`（本次转 living）。
+
 ### Docs
 - README 三语（en / zh-CN / ru）：语言切换行 + badges + 标准 OSS 章节结构；「工具轮
   无文字兜底」章节更新为如实文案 + `DSH_ACP_LONG_TOOLS` 门控说明。

@@ -17,24 +17,37 @@
 //   5. flush() returns sessionId / cwd / stopReason / sawFinal / events.
 //
 // Pure function — no network, no spawn, no gateway. The fixture
-// (test/fixtures/headless-tool-call-sample.jsonl) is the exact bytes dsh
-// emitted on 2026-09-28; tests assert the spec, not implementation detail.
+// was the exact bytes dsh emitted on 2026-09-28; tests assert the spec,
+// not implementation detail. (Sample now inlined below — see §3.1 note.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 
 import { createHeadlessParser } from "../lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "../lib/acp-tool-translation.mjs";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const FIXTURE_PATH = resolve(__dirname, "fixtures", "headless-tool-call-sample.jsonl");
+// Inlined sample (previously an external sample file under test/).
+// Tests depending on external fixture files may not live in test:unit
+// (测试资产规范 §3.1), so the sample is inlined as a de-sensitized constant.
+// Paths in the sample use /tmp/test-user (de-sensitized).
+const SAMPLE_JSONL = [
+  '{"type":"session","sessionId":"session-234ed0db-1f0f-446f-92f2-9e799b4b7104","cwd":"/tmp/test-user"}',
+  '{"type":"status","phase":"turn_start","turn":1}',
+  '{"type":"status","phase":"step_start","turn":1,"step":1}',
+  '{"type":"text","text":"I don\'t have a `get_cwd` tool available. Let me check my current directory using the bash tool instead.\\n\\n"}',
+  '{"type":"tool_call","callId":"call_e855e62c49734ea3ba04b9bb","tool":"bash","input":{"command":"pwd","description":"Print current working directory"}}',
+  '{"type":"tool_result","callId":"call_e855e62c49734ea3ba04b9bb","status":"completed","result":"/tmp/test-user\\n"}',
+  '{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":7681,"outputTokens":87,"totalTokens":7768}}',
+  '{"type":"status","phase":"step_start","turn":1,"step":2}',
+  '{"type":"text","text":"当前目录是 `/tmp/test-user`。\\n\\n说明：我这里没有名为 `get_cwd` 的工具，所以我用 `bash` 工具执行了 `pwd` 命令来获取当前目录。"}',
+  '{"type":"status","phase":"step_end","turn":1,"step":2,"usage":{"inputTokens":7784,"outputTokens":44,"totalTokens":7828}}',
+  '{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}',
+  '{"type":"final","text":"当前目录是 `/tmp/test-user`。\\n\\n说明：我这里没有名为 `get_cwd` 的工具，所以我用 `bash` 工具执行了 `pwd` 命令来获取当前目录。"}',
+].join("\n");
 
 // --- helper: feed the fixture line-by-line, return per-line frames + flush. -
 function parseFixture() {
-  const text = readFileSync(FIXTURE_PATH, "utf8");
+  const text = SAMPLE_JSONL;
   const lines = text.split("\n").filter((l) => l.length > 0);
   const parser = createHeadlessParser();
   const perLine = [];
@@ -221,7 +234,7 @@ test("push: non-string input (number/object/buffer) is rejected silently", () =>
 // ============================================================================
 
 test("integration: parser → translator emits tool_call START (pending) + completed with rawInput backfilled", () => {
-  const text = readFileSync(FIXTURE_PATH, "utf8");
+  const text = SAMPLE_JSONL;
   const lines = text.split("\n").filter(Boolean);
   const parser = createHeadlessParser();
   const translator = createUpdateTranslator();
