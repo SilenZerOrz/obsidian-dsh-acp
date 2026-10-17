@@ -1003,6 +1003,10 @@ function createAgent() {
         let proxyThoughtFrames = 0;
         let proxyResult;
         let proxyErrorText;
+        // H-b 修法 C (2026-10-16): per-turn warn latch. 3080 侧修法 A 已把
+        // sessionId 翻译成 client label，本路径正常不会触发；如果上游回退
+        // / 漏接，这里一次告警 + 改写。
+        let hBSidWarnLatch = false;
         // Layer B（默认 off）：可选地把「调完工具要补收尾句」的提示前置为 system 消息。
         // 默认关闭——每轮注入会改变 prompt 前缀 → 破坏缓存。仅 DSH_ACP_CLOSING_REPLY_NUDGE=1 启用。
         const outboundMessages = withClosingReplyNudge(
@@ -1025,6 +1029,11 @@ function createAgent() {
             // Layer B：outboundMessages 可能含前置 system（未启用时 === history 原数组）。
             messages: outboundMessages,
             signal: ctx.signal,
+            // H-b 修法 C (2026-10-16): adapter 出口防线 — 断言 SSE 帧的
+            // sessionId = 本次 session/prompt 的 client sessionId。如果不等
+            // （说明上游 3080 漏翻译 / 修了 B 但没修 A），改写并 warn 一次。
+            // 3080 侧修法 A 已就位时，本路径 p.sessionId 必然 === session.id，
+            // 不会触发告警；如果新版本回退 / 漏接，告警立刻可见。
             onUpdate: async (method, p) => {
               // t44: proxy 路径的返回体只有 {stopReason, usage}（无 text），
               // 助手正文只经 sessionUpdate 事件到达 → 在此累积，供本轮结束后归档，
@@ -1050,6 +1059,19 @@ function createAgent() {
                   }
                 }
               } catch { /* best-effort */ }
+              // H-b 修法 C: 出口断言 + 改写 + 一次性告警
+              if (p && typeof p === "object" && typeof p.sessionId === "string"
+                  && p.sessionId !== session.id) {
+                if (!hBSidWarnLatch) {
+                  process.stderr.write(
+                    `[dsh-acp warn] dsh-acp.adapter: SSE frame sessionId=${JSON.stringify(p.sessionId)} ` +
+                    `≠ this sessionId=${JSON.stringify(session.id)}; rewriting (one-time warn per turn). ` +
+                    `This indicates upstream gateway did not translate apply() UUID → client label.\n`,
+                  );
+                  hBSidWarnLatch = true;
+                }
+                p = { ...p, sessionId: session.id };
+              }
               if (!ctx?.client) return;
               try {
                 await ctx.client.notify(method, p);

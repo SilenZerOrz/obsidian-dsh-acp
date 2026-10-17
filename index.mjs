@@ -57,7 +57,9 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
 import { registerSessionPanelRoutes } from "./web/session-panel.mjs";
-import { registerHttpGateway } from "./lib/http-gateway.mjs";
+import { registerHttpGateway, officialBridgeEnabled, resolveHttpGatewayDefaultModel } from "./lib/http-gateway.mjs";
+import { createOfficialAcpRouter } from "./lib/acp-official-router.mjs";
+import { probeOfficialBridge } from "./lib/official-acp-bridge.mjs";
 import { resolveRuntimeConfig, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { hasP2Apis, probeHostApiSurface, hostApiSurfaceSummary } from "./lib/version-detect.mjs";
 
@@ -80,6 +82,7 @@ export class DshAcpService extends Service {
 		this._backoffMs = 0;
 		this._restartTimer = null;
 		this._longRt = null;
+		this._longReady = false; // [H1 / G1b-5] long runtime 就绪标志（跨作用域，供 trigger 闸）
 
 		// headless profile MUST stay spawn — long mode requires cordis ctx,
 		// which the cordis plugin already has, but a headless profile is meant
@@ -105,6 +108,12 @@ export class DshAcpService extends Service {
 			let _bootTriggered = false;
 			const trigger = (reason) => {
 				if (_bootTriggered) return;
+				// [H1 / G1b-5] long 已就绪则跳过整条 spawn 兜底（不 spawn、不与 long 双起）。
+				if (this._longReady) {
+					_bootTriggered = true;
+					_acpLog("info", `[H1] long 已就绪，跳过 spawn 兜底（trigger=${reason}）`);
+					return;
+				}
 				_bootTriggered = true;
 				_acpLog("info", `boot trigger: ${reason} — resolving runtime mode`);
 				const env = { ...process.env, DSH_IN_CORDIS: "1" };
@@ -280,9 +289,10 @@ export class DshAcpService extends Service {
 		const rt = getLongRuntime();
 		await rt.init({
 			cordisCtx: this.ctx,
-			acpClient: null, // wired in P2.5+ when long path serves ACP traffic
+			acpClient: { notify: async () => {} }, // [P1-1] temporary stub for long mode boot
 			permissionConfig: resolvePermissionConfig(),
 			cwd: process.cwd(),
+			model: resolveHttpGatewayDefaultModel(), // [H3c-1] seed defaultModel 兜底（修法 1）
 		});
 		this._longRt = rt;
 		return rt;
@@ -415,6 +425,41 @@ export function apply(ctx, config) {
 	// 与 web 路由 hook 正常工作。
 	const svc = new DshAcpService(ctx, config);
 
+	// [H1 / G1b-4] long 启动改造：apply 同步期注册 inject，等 6 服务到齐。
+	// F3b 失败点是在 setTimeout 里调 ctx.inject（ctx 已 dispose）——这里在 apply
+	// 返回前注册，回调由 cordis 在服务到齐时触发，svcCtx 为活 ctx（G1b-3/4 实测
+	// llm=object / stream=function）。成功后置 svc._longReady → trigger 闸跳过 spawn。
+	const longDeps = ["agents", "sessions", "llm", "tools", "systemPrompt", "sessionProjections"];
+	if (typeof ctx.inject === "function") {
+		ctx.inject(longDeps, async (svcCtx) => {
+			if (svc._longReady) return;                       // 幂等守卫：只启动一次
+			const llm = svcCtx?.get?.("llm") ?? svcCtx?.llm;
+			const streamType = typeof llm?.stream;
+			process.stderr.write(`[H1] inject fire, llm=${typeof llm}, stream=${streamType}\n`);
+			if (!llm || streamType !== "function") {
+				process.stderr.write("[H1] llm 无 stream，跳过 long 启动（保留 spawn 兜底）\n");
+				return;
+			}
+			try {
+				const { getLongRuntime } = await import("./lib/long-runtime.mjs");
+				const rt = getLongRuntime();
+				await rt.init({
+					cordisCtx: svcCtx,
+					acpClient: { notify: async () => {} }, // [P1-1] temporary stub for long mode boot
+					permissionConfig: resolvePermissionConfig(),
+					cwd: process.cwd(),
+					model: resolveHttpGatewayDefaultModel(), // [H3c-1] seed defaultModel 兜底（修法 1）
+				});
+				svc._longRt = rt;
+				svc._longReady = true;
+				process.stderr.write("[H1] long runtime 启动成功（spawn 兜底将被跳过）\n");
+			} catch (e) {
+				svc._longReady = false;
+				process.stderr.write("[H1] long runtime 启动失败: " + (e?.message ?? e) + "\n");
+			}
+		});
+	}
+
 	// P1b web 面板路由：仅当 enableWebPanel=true 时挂载 /api-session/*（默认开）。
 	// webServer 是可选 host 服务且晚挂载——apply 时 ctx.get('webServer') 仍为空，
 	// 用 ctx.inject(['webServer'], ...) 在服务可用时再注册路由：headless / CI 冒烟
@@ -422,16 +467,62 @@ export function apply(ctx, config) {
 	// 不因缺服务失败（与 dsh-chat-import 同样的晚挂载策略）。P2：把 ctx 一并传给
 	// registerSessionPanelRoutes，让原生路由（dsh-list / dsh-read / obsidian-import）
 	// 通过 ctx.get('sessionPersistence' | 'agents' | ...) 访问 host 服务。
-	if (config.enableWebPanel !== false && typeof ctx.inject === "function") {
+	// G2-1: 官方桥挂载点脱离 webServer 门。
+	// 上游 apply() 在 mount 时即需要 ctx 携带 required 服务（llm/sessionPersistence/
+	// agents/sessions；logger 为 cordis 内置 accessor）——与 webServer 无关。
+	// 故用独立 inject 门（deps 不含 logger —— 它是内置 mixin，inject 永不 fire），
+	// 在 apply 同步期注册、服务到齐即挂载官方桥；svcCtx 即为该 inject 回调的活 ctx。
+	if (officialBridgeEnabled() && typeof ctx.inject === "function") {
+		// [H2f] 合并门：deps 加 webServer，使官方桥挂载与 HTTP gateway 注册共用同一个 svcCtx。
+		// 原两门分离（H2c 门 + webServer 门）导致 handleSessionPrompt 拿到的是外层插件 ctx
+		// （缺 4 服务）+ officialEnabled:false → 永不走官方桥（H2f-pre3 定性）。
+		ctx.inject(["agents", "sessions", "llm", "sessionPersistence", "webServer"], async (svcCtx) => {
+			// [H2f] 同步首段：先建 router（其内部同步调上游 apply → 建 6×ctx.on effect）。
+			// 必须在**任何 await 之前**执行——否则 await 期间 cordis 把该 inject 子 fiber
+			// 置 INACTIVE，apply 建 effect 时抛 "cannot create effect on inactive context"（F3b 同族）。
+			let router = null;
+			try {
+				router = createOfficialAcpRouter(svcCtx, {}); // 内部调 apply(svcCtx, {stream})，同步建 effect
+				svc._officialRouter = router;
+				_acpLog("info", "[dsh-acp] [H2f] official bridge MOUNTED (router ready, effects registered)");
+			} catch (e) {
+				_acpLog("warn", "[dsh-acp] [H2f] createOfficialAcpRouter failed: " + (e?.message ?? e));
+			}
+
+			// [H2f] 同步注册 HTTP gateway —— 用同一 svcCtx（含 4 服务 + webServer），officialEnabled:true。
+			// 这样 handleSessionPrompt 的 official.getRouter()/probe 都基于能解析服务的 svcCtx。
+			if (svcCtx && svcCtx.webServer && typeof svcCtx.webServer.register === "function") {
+				try {
+					if (config.enableWebPanel !== false) registerSessionPanelRoutes(svcCtx, svcCtx.webServer);
+					await registerHttpGateway(svcCtx, svcCtx.webServer, { officialEnabled: true });
+					_acpLog("info", "[dsh-acp] [H2f] HTTP gateway registered (officialEnabled: true)");
+				} catch (e) {
+					_acpLog("warn", "[dsh-acp] [H2f] registerHttpGateway failed: " + (e?.message ?? e));
+				}
+			} else {
+				_acpLog("warn", "[dsh-acp] [H2f] webServer unavailable in svcCtx; HTTP gateway not registered");
+			}
+
+			// [H2f] probe 后置（纯诊断/日志；不阻塞 router/gateway 建立）
+			try {
+				const probe = await probeOfficialBridge(svcCtx);
+				_acpLog("info", "[dsh-acp] [H2f] probe: " + JSON.stringify({
+					importable: probe.importable, servicesReady: probe.servicesReady,
+					missing: probe.missingServices, advisory: probe.advisoryServices,
+					applySignature: probe.applySignature, error: probe.error,
+				}));
+			} catch (e) {
+				_acpLog("warn", "[dsh-acp] [H2f] probe failed: " + (e?.message ?? e));
+			}
+		});
+	} else if (config.enableWebPanel !== false && typeof ctx.inject === "function") {
+		// [H2f] legacy fallback：官方桥未启用时，仍挂 web 面板路由 + /acp/proxy/*（legacy long 路由）。
 		ctx.inject(["webServer"], async (webCtx) => {
 			if (webCtx && webCtx.webServer && typeof webCtx.webServer.register === "function") {
 				registerSessionPanelRoutes(ctx, webCtx.webServer);
 				ctx?.logger?.info?.("[dsh-acp] web 面板路由已注册: /api-session/{list,export,archive,move,dsh-list,dsh-read,obsidian-list,obsidian-import}");
-				// P3.0 commit 2: 暴露 dsh-acp proxy 端点(probe + prompt SSE),让独立
-				// dsh-acp.mjs 进程能经 HTTP/SSE 调 long-runtime,无需 cordis ctx。
-				// 路由已挂载,long-runtime 仍 lazy init(在第一次 prompt 触发)。
-				await registerHttpGateway(ctx, webCtx.webServer);
-				ctx?.logger?.info?.("[dsh-acp] HTTP gateway 已注册: /acp/proxy/{probe,session/prompt}");
+				await registerHttpGateway(ctx, webCtx.webServer, { officialEnabled: false });
+				ctx?.logger?.info?.("[dsh-acp] HTTP gateway 路由已注册（legacy）: /acp/proxy/{probe,session/prompt}");
 			}
 		});
 	}
