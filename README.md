@@ -2,6 +2,8 @@
 
 **English** · [简体中文](README.zh-CN.md) · [Русский](README.ru.md)
 
+See [CHANGELOG.md](./CHANGELOG.md) for version history.
+
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
@@ -287,8 +289,37 @@ copy-pasteable fix commands.
 - **No permission prompts on the spawn path** — bash / file-write tools run
   without confirmation dialogs there. Use `DSH_ACP_PERMISSION_MODE` (effective on
   the long-runtime path) if you need approvals.
-- **Official dsh bridge is opt-in and usually unavailable** on a dsh web profile
-  today; the adapter falls back to the standalone spawn path automatically.
+- **Official dsh bridge is experimental (0.3.4)** — the default path is *legacy*.
+  Enabling the official bridge requires all three env vars set together (see
+  "Enabling the official bridge" below); when launched via launchd, they must go
+  into the plist `EnvironmentVariables` or `launchctl setenv`, otherwise a restart
+  reverts to legacy.
+- **Permission path hangs (fix planned for 0.3.5)** — under the official bridge +
+  internal router, a tool that triggers approval (`session/request_permission`)
+  hangs. The 0.3.4 default web profile **does not expose bash/write tools**, so
+  users do not hit it in practice.
+
+## Enabling the official bridge (experimental)
+
+0.3.4 defaults to legacy. To enable the official bridge:
+
+```bash
+# Option 1: temporary env (this dsh web process only)
+DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
+DSH_ACP_OFFICIAL_PROVIDER=<provider> \
+DSH_ACP_OFFICIAL_MODEL=<model> \
+dsh --profile web --port 3080 --no-open
+
+# Option 2: launchd (persistent, recommended)
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
+launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
+launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# rollback: launchctl unsetenv ... + kickstart
+```
+
+Verify: `curl -s http://127.0.0.1:3080/acp/proxy/probe` should return
+`official.envSwitchOn:true` + `servicesReady:true`.
 
 ## Development
 

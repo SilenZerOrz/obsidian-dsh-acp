@@ -2,6 +2,8 @@
 
 [English](README.md) · **简体中文** · [Русский](README.ru.md)
 
+版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
@@ -262,8 +264,34 @@ dsh-acp doctor --gc    # 立即执行清理
 
 - **spawn 路径无权限弹窗** —— 该路径下 bash / 写文件等工具不经确认直接执行。需要
   审批时用 `DSH_ACP_PERMISSION_MODE`（仅在 long-runtime 路径生效）。
-- **官方 dsh bridge 是可选且目前通常不可用**（在 dsh web profile 上）；适配器会自动
-  回退到独立的 spawn 路径。
+- **官方桥为实验性（0.3.4）** —— 默认走 *legacy* 路径。启用官方桥需三件套 env 同设
+  （见下方「启用官方桥」）；经 launchd 启动需写入 plist `EnvironmentVariables` 或
+  `launchctl setenv`，否则重启即回 legacy。
+- **权限路径挂起（计划 0.3.5 修）** —— 官方桥 + 内部 router 组合下，触发审批的工具
+  （`session/request_permission`）会挂起。0.3.4 默认 web profile **不暴露 bash/write
+  工具**，用户实际碰不到。
+
+## 启用官方桥（实验性）
+
+0.3.4 默认 legacy。若需启用官方桥：
+
+```bash
+# 方式 1：临时 env（仅本次 dsh web 进程）
+DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
+DSH_ACP_OFFICIAL_PROVIDER=<provider> \
+DSH_ACP_OFFICIAL_MODEL=<model> \
+dsh --profile web --port 3080 --no-open
+
+# 方式 2：launchd 常驻（推荐，永久生效）
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
+launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
+launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# 回滚：launchctl unsetenv ... + kickstart
+```
+
+验证：`curl -s http://127.0.0.1:3080/acp/proxy/probe` 应返回
+`official.envSwitchOn:true` + `servicesReady:true`。
 
 ## 开发
 

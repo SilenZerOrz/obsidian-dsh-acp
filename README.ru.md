@@ -2,6 +2,8 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · **Русский**
 
+История версий — [CHANGELOG.md](./CHANGELOG.md).
+
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
@@ -285,8 +287,38 @@ headless с готовыми командами починки.
 - **Нет запросов разрешений на пути spawn** — там инструменты bash / записи файлов
   выполняются без диалогов подтверждения. Для подтверждений используйте
   `DSH_ACP_PERMISSION_MODE` (действует на пути long-runtime).
-- **Официальный bridge dsh опционален и обычно недоступен** в профиле dsh web;
-  адаптер автоматически откатывается к автономному пути spawn.
+- **Официальный bridge dsh — экспериментальный (0.3.4)** — по умолчанию используется
+  путь *legacy*. Для включения официального bridge нужны все три переменные окружения
+  одновременно (см. «Включение официального bridge» ниже); при запуске через launchd
+  их нужно поместить в `EnvironmentVariables` plist или `launchctl setenv`, иначе
+  перезапуск вернёт legacy.
+- **Зависание пути разрешений (исправление запланировано на 0.3.5)** — при официальном
+  bridge + внутреннем router инструмент, запрашивающий подтверждение
+  (`session/request_permission`), зависает. Профиль web по умолчанию (0.3.4) **не
+  предоставляет инструменты bash/write**, поэтому на практике пользователь с этим не
+  сталкивается.
+
+## Включение официального bridge (экспериментальный)
+
+0.3.4 по умолчанию использует legacy. Чтобы включить официальный bridge:
+
+```bash
+# Вариант 1: временное окружение (только этот процесс dsh web)
+DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
+DSH_ACP_OFFICIAL_PROVIDER=<provider> \
+DSH_ACP_OFFICIAL_MODEL=<model> \
+dsh --profile web --port 3080 --no-open
+
+# Вариант 2: launchd (постоянно, рекомендуется)
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
+launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
+launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# откат: launchctl unsetenv ... + kickstart
+```
+
+Проверка: `curl -s http://127.0.0.1:3080/acp/proxy/probe` должно вернуть
+`official.envSwitchOn:true` + `servicesReady:true`.
 
 ## Разработка
 

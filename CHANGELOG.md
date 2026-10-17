@@ -10,6 +10,18 @@
   设 `DSH_ACP_PROXY_MODE=false`，用扁平 id `jl-token/<model>`）。
 
 ### Fixed
+- **sessionId 翻译（H-b）**：官方桥 `apply()` 在 `session/new` 自生成 UUID，与
+  agent-client `session/new` 拿到的 client label 不一致 → 通知被客户端丢弃 → UI
+  转圈无响应。修复：
+  - router 层按 `applyToClient` 反查翻译（缺失时发可见 `[dsh-acp error]` 帧，不静默丢）；
+  - gateway / adapter 出口各加 assert+rewrite+warn 兜底（per-turn 一次告警）。
+- **model 兜底（H3c-1）**：`init` 路径（`index.mjs` 的 H1 inject + `startLong` 两处）
+  补 `model: resolveHttpGatewayDefaultModel()`，修复 `defaultModel=null` 导致
+  `LongRuntime.prompt: no model configured` 的问题；`long-runtime` 抛错前再兜一次
+  硬编码默认模型作纵深防御。
+- **单测门禁（C1 遗留）**：同步 4 处 C1 dedup 落地后陈旧的计数断言
+  （`long-runtime.test.mjs:161` + `llm-event-bridge.test.mjs` 3 处）。`npm run test:unit`
+  现 **380/380/0**。
 - **chunk-mapper（C1）**：块结束快照在增量 delta 已发送时跳过，消除整段重复。
 - **long-runtime（C2）**：provider 缺失时给出可读报错，不再出现无意义的 `"default"`。
 - **spawn（C3）**：裸模型 id 回退到默认 provider，不再因 `$.provider` 缺失被拒。
@@ -38,6 +50,8 @@
   因每轮会改 prompt 前缀、破坏缓存，故默认关闭。文案可用
   `DSH_ACP_CLOSING_REPLY_NUDGE_TEXT` 覆盖。
 - **`DSH_ACP_TOOL_ONLY_FALLBACK`**（默认 on）：关闭 Layer A 兜底显示。
+- **纯函数 `lib/acp-session-id-translate.mjs`** + 单测 `test/session-id-translate.test.mjs`
+  （4 用例，已登记进 `test:unit`）。
 - `docs/SELFCHECK.md` / `docs/releasing.md` / `docs/known-gaps.md`。
 
 ### Docs
@@ -48,6 +62,12 @@
 ### Known gaps
 - proxy 与 spawn 下 memory 工具均不执行；跨 session 记忆不可用（实测 0/3 答对）。
   详见 `docs/known-gaps.md`。
+- **官方桥为实验性**，0.3.4 默认 legacy（`DSH_ACP_USE_OFFICIAL_BRIDGE` 默认 `0`）。
+  启用需三件套 env 同设：`DSH_ACP_USE_OFFICIAL_BRIDGE=1` +
+  `DSH_ACP_OFFICIAL_PROVIDER=<provider>` + `DSH_ACP_OFFICIAL_MODEL=<model>`。
+- **权限路径挂起**（官方桥 + router 组合下 `session/request_permission` 未处理）：
+  0.3.4 的 web profile composition **不暴露 bash/write 工具**，用户实际碰不到；
+  计划 **0.3.5 修**。
 
 ### Notes
 - 两处 **upstream deviation**（源自 `github.com/SilenZerOrz/obsidian-dsh-acp@windows-support-032`）：
