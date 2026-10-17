@@ -39,10 +39,33 @@ awesome-dsh-plugin/
 test/fixtures/
 
 # Local-only test suite + dev scripts (not part of the npm package)
-test/
+test/*
+# 放行 test:unit 白名单（发布自检门禁）；其余 test/*.test.mjs 保持忽略
+# 规则：只有 package.json test:unit 里登记的文件才入库；新增白名单文件需同步加 !
+!test/runtime-switch.test.mjs
+!test/long-runtime.test.mjs
+!test/long-runtime-tools-injection.test.mjs
+!test/config-schema.test.mjs
+!test/chunk-mapper.test.mjs
+!test/llm-event-bridge.test.mjs
+!test/permission-gate.test.mjs
+!test/session-config.test.mjs
+!test/http-gateway.test.mjs
+!test/proxy-mode.test.mjs
+!test/http-gateway-bidi.test.mjs
+!test/acp-tool-translation.test.mjs
+!test/abort-utils.test.mjs
+!test/cwd-validator.test.mjs
+!test/headless-json-parser.test.mjs
+!test/headless-json-flag-detect.test.mjs
+!test/doctor-headless-profile.test.mjs
+!test/doctor-windows-spawn.test.mjs
+!test/session-id-translate.test.mjs
 scripts/
 acp-feature-test.mjs
 test-validate-cwd.mjs
 
 # AgentTeams plugin runtime state (per-machine, not source)
 .agent-teams/
+data/
+perm.txt
