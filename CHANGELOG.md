@@ -1,5 +1,25 @@
 # Changelog
 
+## Known limitation (0.3.4, 2026-10-18)
+
+**Headless credential store not read since dsh CLI 0.2.1-rc.2**
+
+- `dsh-headless@0.2.1-rc.2` disables the managed credential store by design;
+  `.credentials.yaml` is ignored for `headless` profile.
+- Fallback chain: `process.env` → `<cwd>/.env` → `$DSH_HOME/.env`.
+- dsh-acp does **not** forward credentials from `.credentials.yaml` to the
+  spawned `dsh` process (by design; see section "Headless credential setup"
+  in README).
+- Fix: create `~/.dsh/.env` with `<apiKeyEnv>=<key>` matching your provider
+  config in `~/.dsh/profiles/*/cordis.patch.yml`.
+
+### dsh CLI compatibility matrix
+
+| dsh CLI | headless 凭据来源 | 需配 `~/.dsh/.env`? |
+|---|---|---|
+| 0.2.0-rc.2 及更早 | `.credentials.yaml` | ❌ |
+| 0.2.1-rc.2 及更新 | `.env` 回退 | ✅ |
+
 ## 0.3.4
 
 ### Breaking

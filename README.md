@@ -299,6 +299,29 @@ copy-pasteable fix commands.
   hangs. The 0.3.4 default web profile **does not expose bash/write tools**, so
   users do not hit it in practice.
 
+## Headless credential setup
+
+Since `@deepseek-ai/dsh` 0.2.1-rc.2, the `headless` profile disables the managed
+credential store (`~/.dsh/.credentials.yaml` is **not** read). API-key routes
+fall back to: `process.env` → `<invocation cwd>/.env` → `$DSH_HOME/.env`.
+
+If you see `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`:
+
+1. Find the env name from `~/.dsh/profiles/<profile>/cordis.patch.yml` —
+   the provider's `apiKeyEnv` field (e.g. `JLTOKEN_API_KEY`, note: this may
+   differ from the ref name in `.credentials.yaml`).
+2. Write it into `~/.dsh/.env`:
+   ```
+   JLTOKEN_API_KEY=<your-key>
+   ```
+3. On Windows, restrict permissions:
+   ```powershell
+   icacls "$env:USERPROFILE\.dsh\.env" /inheritance:r /grant:r "${env:USERNAME}:R"
+   ```
+4. Restart DSH Desktop / Obsidian.
+
+Verify: `dsh --profile headless echo hi` should succeed without errors.
+
 ## Enabling the official bridge (experimental)
 
 0.3.4 defaults to legacy. To enable the official bridge:

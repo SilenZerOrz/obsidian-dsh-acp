@@ -297,6 +297,33 @@ headless с готовыми командами починки.
   (`session/request_permission`), зависает. Профиль web по умолчанию (0.3.4) **не
   предоставляет инструменты bash/write**, поэтому на практике пользователь с этим не
   сталкивается.
+- **Учётные данные headless (dsh CLI ≥ 0.2.1-rc.2)** — профиль `headless` отключает
+  управляемое хранилище учётных данных (не читает `~/.dsh/.credentials.yaml`); цепочка
+  отката для API-key: `process.env` → `<cwd>/.env` → `$DSH_HOME/.env`. См. «Настройка
+  учётных данных headless» ниже.
+
+## Настройка учётных данных headless
+
+Начиная с `@deepseek-ai/dsh` 0.2.1-rc.2, профиль `headless` **отключает** управляемое
+хранилище учётных данных (`~/.dsh/.credentials.yaml` **не читается**). Цепочка отката
+для API-key: `process.env` → `<каталог вызова>/.env` → `$DSH_HOME/.env`.
+
+Если видите `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`:
+
+1. Найдите имя переменной в `~/.dsh/profiles/<profile>/cordis.patch.yml` — поле
+   `apiKeyEnv` провайдера (например `JLTOKEN_API_KEY`; **учтите**: оно может
+   отличаться от ref-имени в `.credentials.yaml`).
+2. Запишите в `~/.dsh/.env`:
+   ```
+   JLTOKEN_API_KEY=<ваш-ключ>
+   ```
+3. В Windows ограничьте права:
+   ```powershell
+   icacls "$env:USERPROFILE\.dsh\.env" /inheritance:r /grant:r "${env:USERNAME}:R"
+   ```
+4. Перезапустите DSH Desktop / Obsidian.
+
+Проверка: `dsh --profile headless echo hi` должен отработать без ошибок.
 
 ## Включение официального bridge (экспериментальный)
 

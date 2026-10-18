@@ -270,6 +270,31 @@ dsh-acp doctor --gc    # 立即执行清理
 - **权限路径挂起（计划 0.3.5 修）** —— 官方桥 + 内部 router 组合下，触发审批的工具
   （`session/request_permission`）会挂起。0.3.4 默认 web profile **不暴露 bash/write
   工具**，用户实际碰不到。
+- **headless 凭据（dsh CLI ≥ 0.2.1-rc.2）** —— `headless` profile 禁用托管凭据存储
+  （不读 `~/.dsh/.credentials.yaml`）；API-key 回退链：`process.env` → `<cwd>/.env` →
+  `$DSH_HOME/.env`。详见下方「headless 凭据设置」。
+
+## headless 凭据设置
+
+自 `@deepseek-ai/dsh` 0.2.1-rc.2 起，`headless` profile **禁用**托管凭据存储
+（不读 `~/.dsh/.credentials.yaml`）。API-key 回退链：`process.env` → `<调用目录>/.env`
+→ `$DSH_HOME/.env`。
+
+若报 `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`：
+
+1. 从 `~/.dsh/profiles/<profile>/cordis.patch.yml` 找 provider 的 `apiKeyEnv` 字段
+   （如 `JLTOKEN_API_KEY`；**注意**可能与 `.credentials.yaml` 里的 ref 名不同）。
+2. 写入 `~/.dsh/.env`：
+   ```
+   JLTOKEN_API_KEY=<你的密钥>
+   ```
+3. Windows 收紧权限：
+   ```powershell
+   icacls "$env:USERPROFILE\.dsh\.env" /inheritance:r /grant:r "${env:USERNAME}:R"
+   ```
+4. 重启 DSH Desktop / Obsidian。
+
+验证：`dsh --profile headless echo hi` 应无报错。
 
 ## 启用官方桥（实验性）
 
