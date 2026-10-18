@@ -152,10 +152,16 @@ export const DSH_CORE_MIN_PIN = "0.2.1-alpha.1";
  * → headless profile 起不来。故所有 install 提示必须逐包 pin。
  */
 export function detectCorePinVersion() {
+  // 测试钩子（仅测试用；生产恒为 undefined → 走真实探测）。
+  if (typeof _testVersionOverride !== "undefined") return _testVersionOverride;
   const raw = getDshVersion();
   const m = raw && raw.match(/(\d+\.\d+\.\d+(?:-[\w.]+)?)/);
   return m ? m[1] : DSH_CORE_MIN_PIN;
 }
+
+/** 测试钩子：覆盖 detectCorePinVersion() 返回值（仅测试用；传 undefined 复位）。 */
+let _testVersionOverride;
+export function __setTestVersion(v) { _testVersionOverride = v; }
 
 /** 生成「5 个核心包 @ <ver>」的逐包 pin 字符串（用于 install 提示）。 */
 export function pinnedCorePackages(ver = DSH_CORE_MIN_PIN) {
@@ -190,16 +196,24 @@ export function parseCredentialIssue(errMsg) {
     "minimax-cn": "MINIMAX_CN_API_KEY",
   };
   const envName = keyEnv?.[1] || ENV_BY_PROVIDER[provider] || `${provider.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+  // 双提示（不依赖 DSH_PROFILE env var——doctor CLI 场景下该变量常不可靠）：
+  // headless 与 web/desktop 两种场景各给一份，用户按自身情况择一。
   return {
     kind: "missing-credential",
     severity: "high",
     provider, envName,
     hint: `dsh 需要 provider「${provider}」的 API Key（环境变量 ${envName}）。`,
     fix: [
-      `# 一次性（当前 shell/会话）`,
+      `# === headless 场景（dsh CLI ≥ 0.2.1-rc.2，禁用托管凭据存储）===`,
+      `# headless 只读 process.env / <cwd>/.env / $DSH_HOME/.env，不读 .zshrc`,
+      `echo '${envName}=YOUR_${envName}' >> ~/.dsh/.env`,
+      `# Windows: icacls "%USERPROFILE%\\.dsh\\.env" /inheritance:r /grant:r "%USERNAME%:R"`,
+      ``,
+      `# === 非 headless 场景（web/desktop CLI 手动运行）===`,
       `export ${envName}=YOUR_${envName}`,
-      `# 永久（写入 shell 配置 ~/.zshrc 后 source）`,
       `echo 'export ${envName}=YOUR_${envName}' >> ~/.zshrc`,
+      ``,
+      `# 然后重启 DSH Desktop / Obsidian（或 source ~/.zshrc）`,
     ],
   };
 }
@@ -475,6 +489,51 @@ export function diagnoseHeadlessProfile() {
         `mv ${settingsYml} ${settingsYml}.bak`,
       ],
     });
+  }
+
+  // ----- 层 6: headless 凭据来源（dsh CLI ≥ 0.2.1-rc.2 禁用托管凭据存储）-----
+  // dsh-headless@0.2.1-rc.2 起 cordis.patch.yml 加 credentials/authorization/
+  // deepseek-account `disabled: true` → 不读 ~/.dsh/.credentials.yaml；API-key
+  // 回退链变为 process.env → <cwd>/.env → $DSH_HOME/.env。缺则报 MISSING_CREDENTIAL。
+  // 保守策略：版本不可判定（compareSemver=null）或 < 0.2.1-rc.2 → 跳过不报。
+  if (existsSync(cordisYml)) {
+    try {
+      const cmp = compareSemver(dshVer, "0.2.1-rc.2");
+      if (cmp !== null && cmp >= 0) {
+        let cordisText = "";
+        try { cordisText = readTextSafe(cordisYml); } catch { /* 读不到则不报 */ }
+        // 正则提取 apiKeyEnv（不引 yaml 依赖；cordis.patch.yml 该行格式稳定）
+        const envNames = [...cordisText.matchAll(/apiKeyEnv:\s*([A-Za-z_][A-Za-z0-9_]*)/g)].map((mm) => mm[1]);
+        if (envNames.length > 0) {
+          const envFile = join(dshHome, ".env");
+          let envText = "";
+          if (existsSync(envFile)) { try { envText = readTextSafe(envFile); } catch { /* ignore */ } }
+          const missing = envNames.filter((name) => {
+            if (process.env[name]) return false;                        // 启动环境已有
+            const re = new RegExp(`^\\s*${name}\\s*=`, "m");            // .env 文件已有
+            return !re.test(envText);
+          });
+          if (missing.length > 0) {
+            issues.push({
+              kind: "headless-credential-env",
+              severity: "high",
+              hint: `dsh CLI ${dshVer} 的 headless profile 已禁用托管凭据存储；` +
+                    `API key 需经 ~/.dsh/.env 提供（当前缺: ${missing.join(", ")}）。`,
+              file: envFile,
+              fix: [
+                `# headless（dsh ≥ 0.2.1-rc.2）只读 启动env / <cwd>/.env / $DSH_HOME/.env；`,
+                `# 不读 .credentials.yaml，也不读用户 shell 配置（.zshrc）。`,
+                `# 把下列写入 ${envFile}（值取自 .credentials.yaml 的 refs 或你的 API key）：`,
+                ...missing.map((n) => `${n}=<your-key>`),
+                `# Windows 收紧权限:`,
+                `icacls "%USERPROFILE%\\.dsh\\.env" /inheritance:r /grant:r "%USERNAME%:R"`,
+                `# 然后重启 DSH Desktop / Obsidian`,
+              ],
+            });
+          }
+        }
+      }
+    } catch { /* doctor 不因单项检查失败而崩溃 */ }
   }
 
   return issues;

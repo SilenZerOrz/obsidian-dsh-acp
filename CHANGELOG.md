@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.5
+
+### Added
+
+- **doctor 层 6：headless 凭据检查**（`diagnoseHeadlessProfile`）
+  - 检测条件：`dsh CLI >= 0.2.1-rc.2` + `profile=headless` + `cordis.patch.yml` 含 `apiKeyEnv`
+  - 检查 `process.env` + `$DSH_HOME/.env` 是否含对应 key
+  - 缺失 → 报 `headless-credential-env / high` + `.env` 写入命令 + Windows `icacls`
+  - 保守策略：版本不可判定或 `< 0.2.1-rc.2` → 跳过不报
+  - 测试钩子 `__setTestVersion`（test-only）
+
+### Changed
+
+- **`parseCredentialIssue` 双提示**：headless 与 web/desktop 场景并列，不再依赖 `DSH_PROFILE` env var
+
+### Tests
+
+- `test/doctor-headless-profile.test.mjs`: +4 层 6 用例 +1 `parseCredentialIssue` 双提示用例
+- `npm run test:unit`: 367 → **372/372/0**
+
+### Docs
+
+- `docs/规范/发布SOP.md` §A15：test 文件敏感串双层扫描（L1 工作区 + L2 已提交 diff + 工作树补扫）
+
 ## Known limitation (0.3.4, 2026-10-18)
 
 **Headless credential store not read since dsh CLI 0.2.1-rc.2**

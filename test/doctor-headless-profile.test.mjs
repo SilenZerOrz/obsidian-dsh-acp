@@ -218,3 +218,121 @@ test("profile dir missing entirely", () => {
     reset();
   }
 });
+
+// === P0-1: 层 6 headless 凭据检查 ===
+import { __setTestVersion } from "../doctor.mjs";
+
+const ENV_PATCH = BASE_PATCH; // BASE_PATCH 含 apiKeyEnv: JL_TOKEN_API_KEY
+
+test("层 6: headless + dsh ≥ 0.2.1-rc.2 + 无 .env → 报 high", () => {
+  reset();
+  const dir = newTmpProfile();
+  const home = newTmpProfile();      // 临时 DSH_HOME（无 .env）
+  const prevHome = process.env.DSH_HOME;
+  try {
+    process.env.DSH_ACP_PROFILE_DIR = dir;
+    process.env.DSH_HOME = home;
+    delete process.env.JL_TOKEN_API_KEY;
+    setupGood(dir);
+    __setTestVersion("0.2.1-rc.2");
+    const issues = diagnoseHeadlessProfile();
+    const hit = issues.find((i) => i.kind === "headless-credential-env");
+    assert.ok(hit, `expected headless-credential-env, got: ${JSON.stringify(issues.map((i) => i.kind))}`);
+    assert.equal(hit.severity, "high");
+    assert.ok(hit.hint.includes("JL_TOKEN_API_KEY"), "hint should name the missing env");
+  } finally {
+    __setTestVersion(undefined);
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    reset();
+  }
+});
+
+test("层 6: headless + dsh ≥ 0.2.1-rc.2 + .env 含 key → 不报", () => {
+  reset();
+  const dir = newTmpProfile();
+  const home = newTmpProfile();
+  const prevHome = process.env.DSH_HOME;
+  try {
+    process.env.DSH_ACP_PROFILE_DIR = dir;
+    process.env.DSH_HOME = home;
+    delete process.env.JL_TOKEN_API_KEY;
+    setupGood(dir);
+    writeFile(home, ".env", "JL_TOKEN_API_KEY=dummy\n");
+    __setTestVersion("0.2.1-rc.2");
+    const issues = diagnoseHeadlessProfile();
+    assert.ok(!issues.some((i) => i.kind === "headless-credential-env"),
+      `should NOT report; got: ${JSON.stringify(issues.map((i) => i.kind))}`);
+  } finally {
+    __setTestVersion(undefined);
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    reset();
+  }
+});
+
+test("层 6: headless + dsh < 0.2.1-rc.2 → 不报（旧版读 credentials.yaml）", () => {
+  reset();
+  const dir = newTmpProfile();
+  const home = newTmpProfile();
+  const prevHome = process.env.DSH_HOME;
+  try {
+    process.env.DSH_ACP_PROFILE_DIR = dir;
+    process.env.DSH_HOME = home;
+    delete process.env.JL_TOKEN_API_KEY;
+    setupGood(dir);
+    __setTestVersion("0.2.0-rc.2");
+    const issues = diagnoseHeadlessProfile();
+    assert.ok(!issues.some((i) => i.kind === "headless-credential-env"),
+      `old dsh should NOT report; got: ${JSON.stringify(issues.map((i) => i.kind))}`);
+  } finally {
+    __setTestVersion(undefined);
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    reset();
+  }
+});
+
+test("层 6: 版本不可判定（compareSemver null）→ 保守不报", () => {
+  reset();
+  const dir = newTmpProfile();
+  const home = newTmpProfile();
+  const prevHome = process.env.DSH_HOME;
+  try {
+    process.env.DSH_ACP_PROFILE_DIR = dir;
+    process.env.DSH_HOME = home;
+    delete process.env.JL_TOKEN_API_KEY;
+    setupGood(dir);
+    __setTestVersion("not-a-version");   // compareSemver → null
+    const issues = diagnoseHeadlessProfile();
+    assert.ok(!issues.some((i) => i.kind === "headless-credential-env"),
+      `unparseable version should NOT report; got: ${JSON.stringify(issues.map((i) => i.kind))}`);
+  } finally {
+    __setTestVersion(undefined);
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    reset();
+  }
+});
+
+// === P0-1: parseCredentialIssue（凭据修复提示）===
+import { parseCredentialIssue } from "../doctor.mjs";
+
+test("parseCredentialIssue: 不抛错 + 双提示（.env + .zshrc）", () => {
+  const issue = parseCredentialIssue(
+    'MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "jltoken"; its profile resolves JLTOKEN_API_KEY',
+  );
+  assert.ok(issue, "应返回 issue 对象（非 null）");
+  assert.equal(issue.kind, "missing-credential");
+  assert.equal(issue.severity, "high");
+  assert.equal(issue.envName, "JLTOKEN_API_KEY");
+
+  const fixText = issue.fix.join("\n");
+  assert.match(fixText, /~\/\.dsh\/\.env/, "应含 headless .env 提示");
+  assert.match(fixText, /\.zshrc/, "应含非 headless .zshrc 提示");
+  assert.match(fixText, /JLTOKEN_API_KEY/, "应含具体 env 名");
+});
