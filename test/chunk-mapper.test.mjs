@@ -275,6 +275,51 @@ test("usage chunk with missing totalTokens → used=0", () => {
   assert.equal(u.used, 0);
 });
 
+// 0.3.6: `size` is the context-window ceiling. dsh TokenUsage has none, so the
+// default stays 0 (unknown) — but the frame must keep a NUMBER (the Obsidian
+// agent-client's zod schema requires size; omitting it throws on parse), and an
+// operator (or a future producer) can supply a real ceiling.
+test("usage chunk: DSH_ACP_CONTEXT_WINDOW supplies the size ceiling", () => {
+  const prev = process.env.DSH_ACP_CONTEXT_WINDOW;
+  process.env.DSH_ACP_CONTEXT_WINDOW = "128000";
+  try {
+    const u = chunkToUpdate(mk("usage", { usage: { totalTokens: 15 } }), createMapperState());
+    assert.equal(u.used, 15);
+    assert.equal(u.size, 128000);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_ACP_CONTEXT_WINDOW;
+    else process.env.DSH_ACP_CONTEXT_WINDOW = prev;
+  }
+});
+
+test("usage chunk: a producer-supplied ceiling wins over the env override", () => {
+  const prev = process.env.DSH_ACP_CONTEXT_WINDOW;
+  process.env.DSH_ACP_CONTEXT_WINDOW = "128000";
+  try {
+    const u = chunkToUpdate(
+      mk("usage", { usage: { totalTokens: 15, contextWindow: 200000 } }),
+      createMapperState(),
+    );
+    assert.equal(u.size, 200000);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_ACP_CONTEXT_WINDOW;
+    else process.env.DSH_ACP_CONTEXT_WINDOW = prev;
+  }
+});
+
+test("usage chunk: unparsable ceilings fall back to size=0 (never dropped)", () => {
+  const prev = process.env.DSH_ACP_CONTEXT_WINDOW;
+  process.env.DSH_ACP_CONTEXT_WINDOW = "not-a-number";
+  try {
+    const u = chunkToUpdate(mk("usage", { usage: { totalTokens: 15 } }), createMapperState());
+    assert.equal(typeof u.size, "number");
+    assert.equal(u.size, 0);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_ACP_CONTEXT_WINDOW;
+    else process.env.DSH_ACP_CONTEXT_WINDOW = prev;
+  }
+});
+
 // --- finish -------------------------------------------------------------
 
 test("finish chunk returns null (bridge synthesizes result)", () => {

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.6 (2026-10-19) — HOTFIX
+
+### Fixed
+
+- **默认 proxy/long 路径静默失败**（影响 0.3.4 / 0.3.5 所有用户）
+  - 根因：`9462c8e` 引入 H1 预初始化 stub（`acpClient: { notify: async () => {} }`），
+    `LongRuntime._notifyUpdate` 读 `this.acpClient`（stub），而 `request()` 走
+    `this._liveAcpClient` —— 两个出口口径不一致 → 所有 `session/update` 帧被丢进 stub，
+    客户端只收到 `result`，UI 表现为「发出去没反应、无报错」
+  - 修复：`_notifyUpdate` 改为 `this._liveAcpClient ?? this.acpClient`（对齐 request 语义）；
+    `ensureLongRuntime` 补装（stub 形状检测 → 换 bridge notifier）
+  - 回归测试：`test/notify-live-client.test.mjs`（4 用例，覆盖 H1 预初始化顺序）
+  - 证据：同 prompt before/after，3081 冷启 sessionUpdate 计数 0 → 521~910
+
+- **usage 帧 `size: 0` 导致客户端 `Infinity %`**（cosmetic，不阻塞功能）
+  - 新增 `resolveContextWindow()`：上游 contextWindow → `DSH_ACP_CONTEXT_WINDOW` → 0
+  - 默认仍显示 `used/0 + Infinity%`；要真实百分比需设 `DSH_ACP_CONTEXT_WINDOW`
+    或等 0.4 引入 model→context window 表（known-gaps P2-3）
+
+### Known gaps（0.4 范围）
+
+- **P1 工具调用在 legacy long 路径不可用**：`lib/long-runtime.mjs:387` 注释明确该路径
+  无工具执行器（A3 决策 2026-10-13）。当前 web profile 默认走 legacy，P1 从架构上无法
+  达成。修复路径：0.4 给 long 路径接执行器 或 打通官方桥所需服务。
+- ⚠️ **不要用 `DSH_ACP_LONG_TOOLS=1` 去补 P1**：无执行器时暴露工具 schema 会让模型
+  请求工具、以零可见文字收尾 —— 会把 P0 的修复打回「无文字」。
+- `lib/headless-json-parser.mjs:96` 也有 `size: 0`，同类 cosmetic（未在 0.3.6 改）
+
+### Deprecations
+
+- `0.3.4` / `0.3.5` 的默认 proxy/long 路径静默失败，npm 已标记 deprecated，请升级 0.3.6
+
+### Tests
+
+- `npm run test:unit`: 372 → **379/379/0**（+7 新用例）
+
+### Verification
+
+- P0 真机 6/6 全中（macOS + dsh 0.2.0-rc.2）
+- P1 0/5（架构缺口，非本版回归，见 Known gaps）
+- 验收记录：`docs/规范/真机验收记录/verify-0.3.6-20261019.md`
+
 ## 0.3.5
 
 ### Added

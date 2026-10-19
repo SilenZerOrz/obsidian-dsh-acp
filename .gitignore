@@ -44,6 +44,7 @@ test/*
 # 规则：只有 package.json test:unit 里登记的文件才入库；新增白名单文件需同步加 !
 !test/runtime-switch.test.mjs
 !test/long-runtime.test.mjs
+!test/notify-live-client.test.mjs
 !test/long-runtime-tools-injection.test.mjs
 !test/config-schema.test.mjs
 !test/chunk-mapper.test.mjs
