@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.7 (2026-10-19)
+
+### Fixed
+
+- **入口守卫在 `/tmp` 符号链接下静默无输出**（macOS）
+  - `doctor.mjs` 入口守卫用 `process.argv[1] === fileURLToPath(import.meta.url)` 比较，
+    macOS `/tmp → /private/tmp` 符号链接下两者字符串不等 → doctor 静默 `exit 0`
+  - 修复：`realpathSync` 归一化后比较（`doctor.mjs` 顶部补 `realpathSync` import）
+  - 不影响真实安装（`~/.dsh/profiles/...` / `~/.npm-global/...` 不在 `/tmp` 下）；
+    仅影响隔离测试（pre-existing since v0.3.4）
+
+### Docs
+
+- **补落 `docs/规范/敏感信息审查规范.md`**（0.3.5 时期报告"已建"但**实际从未存在**——
+  工作树无 / git 历史零痕 / 全仓零引用）
+  - L1/L2/L3 敏感等级定义 + fixture 硬约束 + 扫描范围 + 处置流程
+  - 本地脱库（`docs/` 不进 git），仅作维护者参考
+- **README×3 加 "Context window" 段**：说明 `DSH_ACP_CONTEXT_WINDOW` env
+  （`usage_update.size=0` → 客户端 `Infinity%` 的解法；优先级
+  `usage.contextWindow → usage.size → env`，见 `lib/chunk-mapper.mjs:296`）
+
+### Tests
+
+- `test/entry-guard.test.mjs`（新）：入口守卫经符号链接调用应正常输出
+- `npm run test:unit`: 379 → **381/381/0**（+2）
+
 ## 0.3.6 (2026-10-19) — HOTFIX
 
 ### Fixed

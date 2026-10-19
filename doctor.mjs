@@ -9,7 +9,7 @@
 //  - node dsh-acp.mjs doctor --auto[ --apply]   默认只打印修复计划；加 --apply 才执行 user-authorized 项
 //  - 程序内: import { diagnoseFromError, formatFixHints } from "./doctor.mjs"
 
-import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1167,7 +1167,15 @@ export async function runDoctorCli(argv = process.argv.slice(3)) {
 // （否则会在 import 阶段抢先 runDoctorCli + process.exit，跳过 dsh-acp.mjs
 //  的 doctor 分支——那里先跑 self-check kernel）。
 const __isEntryModule = (() => {
-  try { return fileURLToPath(import.meta.url) === process.argv[1]; } catch { return false; }
+  try {
+    const scriptPath = process.argv[1];
+    if (!scriptPath) return false;
+    const selfPath = fileURLToPath(import.meta.url);
+    // realpath 归一化：macOS /tmp → /private/tmp 符号链接下，argv[1] 与
+    // import.meta.url 的字符串形态不同（前者未解析符号链接）→ 原始 === 比较
+    // 会误判"非入口"，doctor 静默 exit 0（Phase 7-A 实测，pre-existing）。
+    return realpathSync(scriptPath) === realpathSync(selfPath);
+  } catch { return false; }
 })();
 if (__isEntryModule && process.argv[2] === "doctor") {
   await runDoctorCli();

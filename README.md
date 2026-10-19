@@ -322,6 +322,21 @@ If you see `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<na
 
 Verify: `dsh --profile headless echo hi` should succeed without errors.
 
+## Context window (usage percentage)
+
+`usage_update` frames include a `size` field (the model's context window). When
+the upstream model does not report one, dsh-acp defaults `size: 0`, which makes
+clients show `used/0 tokens + Infinity%`.
+
+To provide a real context window, set the env var:
+
+```
+DSH_ACP_CONTEXT_WINDOW=200000    # or your model's actual limit
+```
+
+Add it to `~/.dsh/.env` (alongside your API key) or the dsh web process
+environment. It is used as a fallback when the upstream model reports none.
+
 ## Enabling the official bridge (experimental)
 
 0.3.4 defaults to legacy. To enable the official bridge:

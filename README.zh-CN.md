@@ -296,6 +296,19 @@ dsh-acp doctor --gc    # 立即执行清理
 
 验证：`dsh --profile headless echo hi` 应无报错。
 
+## 上下文窗口（usage 百分比）
+
+`usage_update` 帧含 `size` 字段（模型的上下文窗口）。当上游模型不报告该值时，
+dsh-acp 默认 `size: 0`，客户端会显示 `used/0 tokens + Infinity%`。
+
+要提供真实上下文窗口，设置环境变量：
+
+```
+DSH_ACP_CONTEXT_WINDOW=200000    # 或你模型的实际上限
+```
+
+写入 `~/.dsh/.env`（与 API key 一起）或 dsh web 进程环境。仅在上游模型不报告时作为回退。
+
 ## 启用官方桥（实验性）
 
 0.3.4 默认 legacy。若需启用官方桥：
