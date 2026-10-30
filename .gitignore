@@ -63,6 +63,7 @@ test/*
 !test/doctor-windows-spawn.test.mjs
 !test/session-id-translate.test.mjs
 !test/entry-guard.test.mjs
+!test/acp-stdout-purity.test.mjs
 scripts/
 acp-feature-test.mjs
 test-validate-cwd.mjs

@@ -7,7 +7,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for version history.
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
-[![node](https://img.shields.io/node/v/obsidian-dsh-acp)](package.json)
+[![node](Zyq/工作文件/项目-dsh-acp/package.json)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.1.6--alpha.1-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
 
 > Run **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)**

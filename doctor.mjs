@@ -139,8 +139,10 @@ export const DSH_CORE_PACKAGES = Object.freeze([
   "@deepseek-ai/dsh-acp",
 ]);
 
-/** 兜底 pin（detect 不到运行版本时）。这些包的 dist-tags.latest 指向旧版，绝不能裸装。 */
-export const DSH_CORE_MIN_PIN = "0.2.1-alpha.1";
+/** 兜底 pin（detect 不到运行版本时）。这些包的 dist-tags.latest 指向旧版，绝不能裸装。
+ *  2026-10-30 更新：原值 0.2.1-alpha.1 已远落后于本机基线（0.2.1-rc.5），
+ *  探测失败时会给出「装 alpha.1」的过期指引。 */
+export const DSH_CORE_MIN_PIN = "0.2.1-rc.5";
 
 /**
  * 探测「核心包 pin 目标版本」= 运行中的 dsh 版本（干净 semver，去 v 前缀）。
@@ -631,8 +633,10 @@ export function defaultObsidianJsonPath(platform = process.platform, home = home
   return join(home, ".config", "obsidian", "obsidian.json");
 }
 
-/** 本插件声明的 dsh-acp peer 区间（与 package.json 保持一致）。 */
-export const DSH_ACP_PEER_RANGE = ">=0.1.6-alpha.1 <0.3.0";
+/** 本插件声明的 dsh-acp peer 区间（与 package.json 保持一致）。
+ *  2026-10-30 更正：原值 `<0.3.0` 与 package.json 的 `<0.3.0-0` 不一致
+ *  （0.3.0-rc.x 在前者内、在后者外），注释声称的「保持一致」此前是假的。 */
+export const DSH_ACP_PEER_RANGE = ">=0.1.6-alpha.1 <0.3.0-0";
 /** 本插件要求的最低 Node 版本（engines.node）。 */
 export const MIN_NODE_VERSION = "22.13.0";
 

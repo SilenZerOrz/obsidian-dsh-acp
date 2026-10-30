@@ -77,13 +77,22 @@ function setupGood(dir) {
 test("baseline (well-configured profile) → 0 issues", () => {
   reset();
   const dir = newTmpProfile();
+  const home = newTmpProfile();      // 临时 DSH_HOME（隔离真实 ~/.dsh/.env）
+  const prevHome = process.env.DSH_HOME;
   try {
     process.env.DSH_ACP_PROFILE_DIR = dir;
+    process.env.DSH_HOME = home;
+    delete process.env.JL_TOKEN_API_KEY;
     setupGood(dir);
+    // 层 6（dsh ≥ 0.2.1-rc.2）：headless 只认 启动env / <cwd>/.env / $DSH_HOME/.env。
+    // 基线必须自带凭据，否则本用例依赖开发机 ~/.dsh/.env 状态（换机/新用户即红）。
+    writeFile(home, ".env", "JL_TOKEN_API_KEY=dummy\n");
     const issues = diagnoseHeadlessProfile();
     assert.equal(issues.length, 0, `expected 0 issues, got: ${JSON.stringify(issues.map((i) => i.kind))}`);
   } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prevHome;
     rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
     reset();
   }
 });

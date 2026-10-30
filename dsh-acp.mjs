@@ -56,6 +56,7 @@ import { readProfileDefaultModel } from "./lib/http-gateway.mjs";
 import { PERMISSION_MODES } from "./lib/permission-gate.mjs";
 import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
+import { installAcpStdoutGuard, diagNotifyError } from "./lib/acp-stdout-guard.mjs";
 import { splitModel, DEFAULT_PROVIDER } from "./lib/split-model.mjs";
 import {
   probeDshWebGateway,
@@ -1208,7 +1209,7 @@ function createAgent() {
         }
       }
 
-      if (logFile) console.log(`prompt session=${params.sessionId} cwd=${cwd} ${promptText.slice(0, 200)}`);
+      if (logFile) console.error(`prompt session=${params.sessionId} cwd=${cwd} ${promptText.slice(0, 200)}`);
       const messageId = `msg-${randomUUID()}`;
       let receivedChunks = false;
       // Layer A（spawn）：单独跟踪"文本"与"工具"帧，修复此前工具帧被误当文本的 bug：
@@ -1241,7 +1242,7 @@ function createAgent() {
             notifyUpdate(ctx.client, params.sessionId, {
               sessionUpdate: "agent_message_chunk",
               ...textChunk(messageId, chunk),
-            }).catch((e) => console.log(`notify error: ${e}`));
+            }).catch((e) => diagNotifyError(e, "notify text chunk"));
           },
           ctx.signal,
           session.model || undefined,
@@ -1264,7 +1265,7 @@ function createAgent() {
               }
             }
             notifyUpdate(ctx.client, params.sessionId, frame).catch(
-              (e) => console.log(`notify error: ${e}`),
+              (e) => diagNotifyError(e, "notify frame"),
             );
           },
         );
@@ -1605,6 +1606,7 @@ Environment:
   await runManageCli(process.argv.slice(3));
 } else {
   // Default: dual-mode ACP server (spawn or long per env).
+  installAcpStdoutGuard({ logFile });
   runAcpDualMode().catch((err) => {
     console.error("[dsh-acp] fatal:", err && err.message ? err.message : err);
     process.exit(1);
