@@ -90,16 +90,16 @@
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-acp": {
-      "optional": "true"
+      "optional": true
     },
     "dsh-better-sidebar": {
-      "optional": "true"
+      "optional": true
     },
     "@deepseek-ai/dsh-client-locale": {
-      "optional": "true"
+      "optional": true
     },
     "@deepseek-ai/dsh-client-ui-workspace": {
-      "optional": "true"
+      "optional": true
     }
   }
 }
