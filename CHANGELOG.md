@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.8 (2026-10-31)
+
+### Added
+
+- **ACP stdout 协议纯净性守卫**（`lib/acp-stdout-guard.mjs`，P0）
+  - ACP 走 stdio 的 NDJSON 帧协议，**stdout 是协议信道**；adapter 内任何 `console.log`
+    都会往 stdout 写非协议文本 → 客户端帧解析失败
+  - `installAcpStdoutGuard({ logFile })`：把 `console.log/info/debug` 重定向到 stderr；
+    幂等（`Symbol.for("obsidian-dsh-acp.stdout-guard")` 打标）；已有 `logFile` 重定向时跳过
+  - `dsh-acp.mjs` 两处 `.catch((e) => console.log(...))` → `diagNotifyError(e, ...)`；
+    默认 CLI 分支在 `runAcpDualMode()` **之前**安装守卫
+- **防退化断言** `test/acp-stdout-purity.test.mjs`（7/7）
+  - 5 项行为测试 + **2 项源码门**（静态断言 `installAcpStdoutGuard(` 在 `runAcpDualMode().catch(` 之前；
+    文件内 `console.log(` 调用点数符合约束）
+- **doctor 第 6 层：headless 凭据诊断**
+  - 正则提取 headless profile `cordis.patch.yml` 的 `apiKeyEnv:` 名单，若某名字既不在
+    `process.env` 也不在 `$DSH_HOME/.env` → 报 `headless-credential-env`（severity **high**）
+  - 提示里**只列键名**，不含值；dsh 版本不可判定或 `< 0.2.1-rc.2` 时保守不报
+
+### Changed
+
+- **peer 依赖范围化简**（`@deepseek-ai/dsh-acp`）：`>=0.1.6-alpha.1 <0.3.0-0`
+  - 移除 3 个冗余 `||` 备选项（`0.2.0-rc.1` / `0.2.0-rc.2` / `0.2.1-alpha.1`）
+  - 依据 semver 2.0.0 §11：预发布版本低于其对应正式版，三者均落在 `<0.3.0-0` 内，**语义等价**
+- **凭据载体修正**：`cordis.patch.yml` 两处 `apiKeyEnv` 拼写 `DEEPSEKLOCAL_API_KEY` → `DEEPSEEKLOCAL_API_KEY`
+  （web line 65 / headless line 19）
+- **测试基础设施**：`peerDependenciesMeta` 4 处 `"optional": "true"`（字符串）→ `true`（布尔）
+- **`test:officials` 加 `--test-force-exit`**（消除 stdio 句柄导致的进程退出延迟）
+
+### Fixed
+
+- **`test:officials` 挂起**（`acp-official-router-session-c`）
+  - 根因：测试 fixture 违反 dsh-tools 契约，非实现缺陷
+    - `STUB_NOOP_TOOL.output.render` 返回裸字符串，契约要求 `ContentBlock[]`
+      → `dsh-tools:1454` `content.some(...)` 抛错 → 每次 tool_call `status:"failed"` → agent loop 无限重试
+    - `hasToolResult` 只认 `{type:"tool-result"}`，实际 dsh 回灌的是 `{role:"tool"}`
+      → 判据永不命中 → `isToolTurn` 恒真
+  - 修复后：整包 **>600s 挂死 → 17s**，`cancelled: 3 → 0`
+
+### Known issues (not fixed in 0.3.8)
+
+- **C1**：`official-acp-bridge` 测试断言 `missingServices.includes("subagents")`，
+  实现已把 `subagents` 移入 `advisoryServices` → **测试滞后实现**（改断言即可，非实现缺陷）
+- **C2**：`http-gateway-tool-translation(-concurrent)` 测试断言「必须翻译成 `tool_call_update`」，
+  实现自 P0-1 起 **PASS THROUGH `tool_call`** → 同上
+
+> 按 D10-a 口径，门槛 3 = `cancelled = 0`（已达成）；C1/C2 的 3 个 fail 不计入 0.3.8 门槛，
+> 登记为 0.3.9 / 0.4 独立项。详见 `docs/计划文档.md` §8.4 / §8.5。
+
+### Tests
+
+- `test:unit` **388/388/0**
+- `test:protocol` / `test:long` **各 37/0**
+- `test:officials` **27 tests / 15 pass / 3 fail(C1/C2) / 0 cancelled / 9 skipped**
+
+---
+
 ## 0.3.7 (2026-10-19)
 
 ### Fixed

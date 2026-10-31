@@ -289,14 +289,14 @@ copy-pasteable fix commands.
 - **No permission prompts on the spawn path** — bash / file-write tools run
   without confirmation dialogs there. Use `DSH_ACP_PERMISSION_MODE` (effective on
   the long-runtime path) if you need approvals.
-- **Official dsh bridge is experimental (0.3.4)** — the default path is *legacy*.
+- **Official dsh bridge is experimental (0.3.8)** — the default path is *legacy*.
   Enabling the official bridge requires all three env vars set together (see
   "Enabling the official bridge" below); when launched via launchd, they must go
   into the plist `EnvironmentVariables` or `launchctl setenv`, otherwise a restart
   reverts to legacy.
-- **Permission path hangs (fix planned for 0.3.5)** — under the official bridge +
+- **Permission path hangs (still open in 0.3.8)** — under the official bridge +
   internal router, a tool that triggers approval (`session/request_permission`)
-  hangs. The 0.3.4 default web profile **does not expose bash/write tools**, so
+  hangs. The 0.3.8 default web profile **does not expose bash/write tools**, so
   users do not hit it in practice.
 
 ## Headless credential setup
@@ -339,7 +339,7 @@ environment. It is used as a fallback when the upstream model reports none.
 
 ## Enabling the official bridge (experimental)
 
-0.3.4 defaults to legacy. To enable the official bridge:
+0.3.8 defaults to legacy. To enable the official bridge:
 
 ```bash
 # Option 1: temporary env (this dsh web process only)
