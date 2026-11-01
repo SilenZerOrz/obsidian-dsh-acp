@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.4.0 (2026-11-01)
+
+### Fixed
+
+- **TD-2 — mode 持久化读回**（T3）：`initializeModes()` → `initializeModes(rec)`，`currentModeId`
+  由 `rec?.mode ?? "default"` 决定；`newSession` / `loadSession` / `resumeSession` /
+  `forkSession` / `setSessionMode` **5 处调用点**全部传入会话记录。
+  存储层早在 `archive-store.mjs:342` 就写了 `mode: src.mode`，缺的只是 ACP 层读回
+  ⇒ `setSessionMode(acceptEdits)` 后重新 `session/load` 现在返回 `currentModeId='acceptEdits'`，
+  `session/fork` 也继承父会话的 mode。
+- **TD-1 — 错误码规范化**（T4）：6 处 `new RequestError("<字符串>")` 改为**整数码**——
+  `-32602`（Invalid params，5 处：`session not found` ×3 / `invalid modeId` / `source session not found`）
+  与 `-32603`（Internal error，1 处：cwd 校验失败）。
+  原写法把字符串塞进 `code`，`.message` 为空，SDK 发现 `code` 非整数后**降级为
+  `-32600 Invalid request`**，客户端可能显示空白错误。现在错误码正确。
+
+### Notes
+
+- `availableModes` **仍只广播 `[default]`**（SCOPE NOTE 保持不动，M2.4 UI 回归的既定约束）；
+  本版本只修「读回 `currentModeId`」，不重新引入 4-mode 广播。
+
 ## 0.3.9 (2026-11-01)
 
 ### Changed

@@ -558,7 +558,7 @@ function runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, force
 function validateCwdParam(cwd, opName) {
   const res = validateCwd(cwd, opName);
   if (res.ok) return res.cwd;
-  throw new RequestError(res.error.message);
+  throw new RequestError(-32603, res.error.message);
 }
 
 // ---- ACP helpers ---------------------------------------------------------
@@ -580,9 +580,9 @@ function textChunk(messageId, text) {
 // button click has no response. Revert to single-mode stub while we
 // identify the offending field. Re-introduce 4-mode once frontend is
 // confirmed safe (see docs/实施计划/P4-…-实施计划.md §0.7).
-function initializeModes() {
+function initializeModes(rec) {
   return {
-    currentModeId: "default",
+    currentModeId: rec?.mode ?? "default",
     availableModes: [
       { id: "default", name: "Default", description: "Ask before every tool call" },
     ],
@@ -830,13 +830,13 @@ function createAgent() {
     async newSession(params) {
       const cwd = validateCwdParam(params.cwd, "session/new");
       const rec = createSession({ cwd: cwd ?? params.cwd, title: params._meta?.title });
-      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
+      return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
     async loadSession(params) {
       const cwd = validateCwdParam(params.cwd, "session/load");
       const rec = ensureSession(params.sessionId, cwd ?? params.cwd);
-      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
+      return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
     async listSessions(params) {
@@ -895,15 +895,15 @@ function createAgent() {
 
     async resumeSession(params) {
       const rec = getSession(params.sessionId);
-      if (!rec) throw new RequestError(`session ${params.sessionId} not found`);
-      return { sessionId: rec.id, modes: initializeModes(), configOptions: sessionConfigOptions(rec) };
+      if (!rec) throw new RequestError(-32602, `session ${params.sessionId} not found`);
+      return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
     async forkSession(params) {
       const cwd = validateCwdParam(params.cwd, "session/fork");
       const rec = forkSession(params.sessionId, cwd ?? params.cwd);
-      if (!rec) throw new RequestError(`source session ${params.sessionId} not found`);
-      return { sessionId: rec.id, modes: initializeModes() };
+      if (!rec) throw new RequestError(-32602, `source session ${params.sessionId} not found`);
+      return { sessionId: rec.id, modes: initializeModes(rec) };
     },
 
     async closeSession() { return undefined; },
@@ -926,12 +926,12 @@ function createAgent() {
       // it is intentionally left alone. Consequence: we ACCEPT all 4 modes when
       // a client sends them, but still OFFER only `default` in the payload.
       const session = getSession(params.sessionId);
-      if (!session) throw new RequestError(`session ${params.sessionId} not found`);
+      if (!session) throw new RequestError(-32602, `session ${params.sessionId} not found`);
 
       const mode = params.modeId;
       if (typeof mode !== "string" || !PERMISSION_MODES.has(mode)) {
         // Reject loudly — never silently ignore an unknown mode.
-        throw new RequestError(
+        throw new RequestError(-32602,
           `invalid modeId ${JSON.stringify(mode)}: expected one of ${[...PERMISSION_MODES].join(", ")}`,
         );
       }
@@ -944,7 +944,11 @@ function createAgent() {
       updateSessionMeta(params.sessionId, { mode });
 
       // 3) echo the (unchanged) advertised modes payload
-      return { modes: initializeModes() };
+      // TD-2 (0.4.0): reflect the persisted mode back as `currentModeId`.
+      // `availableModes` stays [default] (SCOPE NOTE above — M2.4 UI regression).
+      // `getSession` returns the live cached record that `updateSessionMeta`
+      // just mutated, so this reflects the mode written on line above.
+      return { modes: initializeModes(getSession(params.sessionId)) };
     },
     async setSessionConfigOption(params) {
       // Per-session config override (FEAT). Recognised configIds:
@@ -953,7 +957,7 @@ function createAgent() {
       //   "reasoningEffort" — P2.5 + M2.1: "none" | "low" | "medium" | "high" | "max"
       // Persist onto the session record so prompt() can apply it.
       const session = getSession(params.sessionId);
-      if (!session) throw new RequestError(`session ${params.sessionId} not found`);
+      if (!session) throw new RequestError(-32602, `session ${params.sessionId} not found`);
       if (params.configId === "model" && typeof params.value === "string") {
         const valid = availableModels().map((m) => m.id);
         if (valid.includes(params.value)) {

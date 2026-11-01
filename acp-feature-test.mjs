@@ -175,12 +175,13 @@ await app.connectWith(stream, async (ctx) => {
       setModeThrew = e;
     }
     check("setSessionMode does NOT throw (stub)", setModeThrew === null);
-    // Re-load to see if mode persisted (it should not, since stub is no-op).
+    // TD-2 (0.4.0): the mode now persists across a re-load. `initializeModes(rec)`
+    // reads `rec.mode`, which `updateSessionMeta` wrote on setSessionMode.
     const ls2 = await ctx.request(methods.agent.session.load, { sessionId: s1, cwd: workdir });
     console.log("== modes after setMode(acceptEdits) ==", JSON.stringify(ls2?.modes?.currentModeId));
     check(
-      "GAP: setMode(acceptEdits) does NOT persist (M2.4 revert — stub)",
-      ls2?.modes?.currentModeId === "default",
+      "setMode(acceptEdits) persists (TD-2 0.4.0 — currentModeId='acceptEdits' after re-load)",
+      ls2?.modes?.currentModeId === "acceptEdits",
     );
 
     // ==== W1-ASSERT (t16 §4.3② / 0.3.3-定稿) ==============================
@@ -212,13 +213,9 @@ await app.connectWith(stream, async (ctx) => {
     // PERMISSION_MODES and throws RequestError for unknown values.
     // (was: M2.4 no-op stub that accepted anything)
     //
-    // NOTE (2026-10-30): dsh-acp.mjs:939-941 calls `new RequestError(...)` with a SINGLE
-    // string argument, so `.code` is a string and `.message` is empty. The SDK then
-    // rejects that non-integer code and downgrades the response to `-32600 Invalid request`.
-    // ⇒ error-code correctness is NOT assertable until the single-argument
-    // RequestError call is fixed. That is tracked as tech debt TD-1; to be
-    // registered in docs/计划文档.md.
-    // We only assert "it threw a RequestError", which is the W1 behaviour.
+    // TD-1 已修（0.4.0）；断言具体码 -32602（Invalid params），非降级 -32600。
+    // 调用点已改为 `new RequestError(-32602, "...")`（dsh-acp.mjs:934）；
+    // 改动前只传一个字符串，`.code` 是字符串 → SDK 降级为 -32600，故当时只能断言「抛了 RequestError」。
     let badModeThrew = null;
     try {
       await ctx.request(methods.agent.session.setMode, { sessionId: s1, modeId: "ultra" });
@@ -226,19 +223,20 @@ await app.connectWith(stream, async (ctx) => {
       badModeThrew = e;
     }
     check(
-      "setSessionMode rejects unknown modeId (W1 commit 96220fa; error-code correctness tracked in TD-1)",
+      "setSessionMode rejects unknown modeId with code -32602 (W1 96220fa + TD-1 0.4.0)",
       badModeThrew !== null &&
-        badModeThrew.constructor?.name === "RequestError",
+        badModeThrew.constructor?.name === "RequestError" &&
+        badModeThrew.code === -32602,
     );
 
-    // GAP: fork inherits 'default' since session was never persisted as
-    // acceptEdits (M2.4 revert — fork mode copy is harmless to keep but
-    // produces no observable difference while setSessionMode is a stub).
+    // TD-2/TD-3 (0.4.0): fork now inherits the parent's mode end-to-end.
+    // Storage layer already copied it (`archive-store.mjs:342` — `mode: src.mode`);
+    // the ACP layer now reads it back via `initializeModes(rec)`.
     const fk = await ctx.request(methods.agent.session.fork, { sessionId: s1, cwd: workdir });
     const fkLoad = await ctx.request(methods.agent.session.load, { sessionId: fk.sessionId, cwd: workdir });
     check(
-      "fork inherits 'default' (M2.4 revert — currentModeId='default' on fork)",
-      fkLoad?.modes?.currentModeId === "default",
+      "fork inherits 'acceptEdits' (TD-2/TD-3 0.4.0 — currentModeId='acceptEdits' on fork)",
+      fkLoad?.modes?.currentModeId === "acceptEdits",
     );
     // This GAP block's throwaway fork would otherwise bump the session count
     // and break the later "list after fork has 2 sessions" assertion (section 4
