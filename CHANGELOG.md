@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.9 (2026-11-01)
+
+### Changed
+
+- **测试资产入库（13 个文件）** —— `test/*.test.mjs` 此前被 `.gitignore:42`（`test/*`）忽略，
+  全新克隆跑不了 `test:officials` / `test:realllm`。本次把白名单外的 13 个用例入库，
+  `.gitignore` 的 `!test/` 放行条数 **22 → 24**
+  （`test/acp-official-router-permission.test.mjs` 属 0.5.0 的权限路径，随 0.5.0 入库）。
+- **C1 断言滞后修复** —— `test/official-acp-bridge.test.mjs`：断言改为检查 `advisoryServices`，
+  与实现一致 ⇒ `tests 9 / pass 9 / fail 0`。
+- **C2 断言滞后修复** —— `test/http-gateway-tool-translation.test.mjs` 与
+  `test/http-gateway-tool-translation-concurrent.test.mjs`：断言改为期望官方 `tool_call`
+  起帧**透传**（此前期望被降级为 `tool_call_update{in_progress}`）。
+- **`test:officials` 进程退出等待归零** —— 4 个 http-gateway 文件的「退出等待」由 ~29.5s
+  降至 0.12–0.14s；耗时判据由绝对秒数改为「**无额外退出等待**」。
+
+### Notes
+
+- 本版本**不含运行时改动**：`lib/` 与 `dsh-acp.mjs` 与 0.3.8 一致；
+  面向使用者的 npm 包内容与 0.3.8 等价（差异仅 `package.json` 版本号与 `CHANGELOG.md`）。
+
 ## 0.3.8 (2026-10-31)
 
 ### Added
