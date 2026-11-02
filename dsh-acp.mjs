@@ -558,7 +558,7 @@ function runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, force
 function validateCwdParam(cwd, opName) {
   const res = validateCwd(cwd, opName);
   if (res.ok) return res.cwd;
-  throw new RequestError(-32603, res.error.message);
+  throw new RequestError(-32602, res.error.message);
 }
 
 // ---- ACP helpers ---------------------------------------------------------

@@ -355,10 +355,18 @@ export function forkSession(sourceSessionId, cwd) {
 export function deleteSession(sessionId) {
   const idx = loadIndex();
   const rec = idx.sessions[sessionId];
-  // Also remove the on-disk archives. If we only drop the index record,
-  // listSessionRecords() re-surfaces the session via scanArchives() (which scans
-  // BOTH the dsh-acp archive root and the DSH web official sessions root), so
-  // Obsidian shows "deleted" but the session reappears on reload.
+  // Also remove the on-disk archives. If we only drop the index record, the
+  // session can re-surface on reload from disk — hence both roots are cleared
+  // below. Note which reader sees which root:
+  //   - scanArchives() reads ONLY <DSH_HOME>/sessions/ (the DSH web official
+  //     root; see its `const base = join(dshHome(), "sessions")`). It does NOT
+  //     scan <DSH_HOME>/dsh-acp-archives/, so an adapter-written archive left
+  //     there is invisible to it.
+  //   - dsh-acp's own visibility comes from the INDEX (allSessions() inside
+  //     listSessionRecords()), not from scanning. Dropping the index record is
+  //     what actually hides it on the adapter side.
+  // Clearing both roots keeps the two readers honest: neither can resurrect a
+  // deleted session.
   if (rec && rec.cwd) {
     // The on-disk archive dir is named after `rec.archive` (session-<uuid>),
     // NOT the ACP id (`dsh-<uuid>`). archiveDir(cwd, sessionId) would build

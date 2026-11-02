@@ -294,10 +294,11 @@ copy-pasteable fix commands.
   "Enabling the official bridge" below); when launched via launchd, they must go
   into the plist `EnvironmentVariables` or `launchctl setenv`, otherwise a restart
   reverts to legacy.
-- **Permission path hangs (still open in 0.3.8)** — under the official bridge +
-  internal router, a tool that triggers approval (`session/request_permission`)
-  hangs. The 0.3.8 default web profile **does not expose bash/write tools**, so
-  users do not hit it in practice.
+- **Permission path fixed (0.5.0, unreleased)** — under the official bridge +
+  internal router, a tool that triggered approval (`session/request_permission`)
+  used to hang (0.3.8 and earlier). The router now forwards the server-initiated
+  request to the client and writes the reply back. The default web profile
+  **does not expose bash/write tools**, so most users never hit this either way.
 
 ## Headless credential setup
 
