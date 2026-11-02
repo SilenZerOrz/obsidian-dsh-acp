@@ -1,7 +1,8 @@
 // test/official-bridge-realllm-alignment.test.mjs — #96 真 LLM 冒烟验证字段对齐.
 //
-// Drives the SAME real reasoning LLM (self-hosted Qwen3.8 via example-llm) through
-// BOTH event producers and JSON-diffs the session/update ENVELOPE SHAPES:
+// Drives the SAME real reasoning LLM (endpoint/model resolved from the local dsh
+// profile config — never hardcoded) through BOTH event producers and JSON-diffs
+// the session/update ENVELOPE SHAPES:
 //   - legacy : LongRuntime → ctx.llm.stream → LLMStreamBridge → chunk-mapper
 //   - official: apply() → dsh agent loop → apply()'s own session/update builder
 //
@@ -14,10 +15,11 @@
 // of the default CI run. Run manually:
 //   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' <path-to>/.env | cut -d= -f2- | tr -d '\"')"
 //   node --test test/official-bridge-realllm-alignment.test.mjs
-// Endpoint + model id default to the constants in test/fixtures/qwen-shenke-adapter.mjs
-// (qwenRealConfig) and are overridable via DSH_ACP_REAL_LLM_BASE(_URL) /
-// DSH_ACP_REAL_LLM_MODEL — deliberately NOT hard-coded here, because the self-hosted
-// endpoint's model list changes over time. To discover the live list:
+// Endpoint + model id are NOT constants anywhere in this repo: qwenRealConfig()
+// resolves them from DSH_ACP_REAL_LLM_BASE(_URL) / DSH_ACP_REAL_LLM_MODEL, else
+// from the local dsh profile's cordis.patch.yml (llm-pi-ai providers +
+// agent-default-model), else returns undefined → the suite skips. To discover the
+// live list:
 //   curl -H "Authorization: Bearer $DSH_ACP_REAL_LLM_KEY" "$BASE/models"
 // The key only ever comes from env in THIS process — it is never printed or committed.
 //

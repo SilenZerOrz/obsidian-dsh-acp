@@ -1,7 +1,7 @@
 // test/http-gateway-official-dod.test.mjs — Phase 3 DoD 三条 (#1/#2/#3) 真 LLM 验证.
 //
 // 复用 fixture (bootSpikeContext + QwenShenkeAdapter + createOfficialAcpRouter) +
-// 复用官方 router + Qwen3.8-Flash-Next UD-Q4_K_XL 真 LLM.
+// 复用官方 router + 真实推理模型（端点/模型由本地 dsh profile 配置解析，未写死）。
 //
 // ENV-GATED: 跳过整个文件若 DSH_ACP_REAL_LLM_KEY 未设.
 // timeout: DSH_ACP_REAL_LLM_TIMEOUT (默认 60s).

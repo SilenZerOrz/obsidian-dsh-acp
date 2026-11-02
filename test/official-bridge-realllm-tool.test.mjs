@@ -1,8 +1,9 @@
 // test/official-bridge-realllm-tool.test.mjs — #96 收尾: 真 LLM tool_call 形状实证.
 //
-// Drives the SAME real reasoning LLM (self-hosted Qwen3.8 via example-llm) into a
-// REAL tool call through BOTH event producers, then asserts the raw session/update
-// tool frames match the translation-layer spec table.
+// Drives the SAME real reasoning LLM (endpoint/model resolved from the local dsh
+// profile config — never hardcoded) into a REAL tool call through BOTH event
+// producers, then asserts the raw session/update tool frames match the
+// translation-layer spec table.
 //
 //   - legacy  : ctx.llm.stream({provider, model, messages, tools}) → LLMStreamBridge
 //               → chunk-mapper. Only ever emits tool_call_update (in_progress +
@@ -20,10 +21,11 @@
 // of the default unit CI run. Run manually:
 //   export DSH_ACP_REAL_LLM_KEY="$(grep '^VISUAL_API_KEY=' <path-to>/.env | cut -d= -f2- | tr -d '\"')"
 //   node --test test/official-bridge-realllm-tool.test.mjs
-// Endpoint + model id default to the constants in test/fixtures/qwen-shenke-adapter.mjs
-// (qwenRealConfig) and are overridable via DSH_ACP_REAL_LLM_BASE(_URL) /
-// DSH_ACP_REAL_LLM_MODEL — deliberately NOT hard-coded here (the endpoint's model
-// list changes). Discover the live list:
+// Endpoint + model id are NOT constants anywhere in this repo: qwenRealConfig()
+// resolves them from DSH_ACP_REAL_LLM_BASE(_URL) / DSH_ACP_REAL_LLM_MODEL, else
+// from the local dsh profile's cordis.patch.yml (llm-pi-ai providers +
+// agent-default-model), else returns undefined → the suite skips. Discover the
+// live list:
 //   curl -H "Authorization: Bearer $DSH_ACP_REAL_LLM_KEY" "$BASE/models"
 // The key only ever comes from env in THIS process — never printed or committed.
 // Real-LLM tool 实证 is a #96 (收尾) artifact; #95 itself uses only the stub LLM.

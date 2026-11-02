@@ -36,10 +36,23 @@ obsidian-dsh-acp-*.tgz
 awesome-dsh-plugin/
 
 # Local dev test fixtures (need the global dsh install; not portable)
-test/fixtures/
+# G-N6 (2026-11-01): 5 fixtures ARE tracked now —走 发布SOP.md:227 的 §8 规则 2 例外通道。
+# 原因：test:officials 的 9 个文件里有 8 个 import 它们，不入库则新检出必然
+#      ERR_MODULE_NOT_FOUND（tag 检出验证实测）。具体白名单见下方 test/* 之后的段。
+test/fixtures/*
 
 # Local-only test suite + dev scripts (not part of the npm package)
 test/*
+# G-N6 例外登记（发布SOP.md §8 规则 2）：先放行目录本身，否则 git 不进入被忽略的目录，
+# 后续 ! 规则无法穿透（git 规则：不能重新包含其父目录已被排除的文件）。
+!test/fixtures
+!test/fixtures/headless-tool-call-sample.jsonl
+!test/fixtures/qwen-shenke-adapter.mjs
+!test/fixtures/spike-bootstrap.mjs
+!test/fixtures/spike-llm-stub.mjs
+!test/fixtures/spike-stream.mjs
+!test/fixtures/resolve-dsh-llm.mjs
+!test/fixtures/local-llm-config.mjs
 # 放行 test:unit 白名单（发布自检门禁）；其余 test/*.test.mjs 保持忽略
 # 规则：只有 package.json test:unit 里登记的文件才入库；新增白名单文件需同步加 !
 !test/runtime-switch.test.mjs
