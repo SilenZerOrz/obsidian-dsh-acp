@@ -1,5 +1,16 @@
 // test/fixtures/local-llm-config.mjs — 从本机 dsh profile 读取 LLM 配置（去写死）。
 //
+// ⚠️ 复用者注意（G-N6c，2026-11-02）—— 端点与模型名默认取自**你本机**的 dsh 配置：
+//   1) 端点 / 模型：`${DSH_HOME:-~/.dsh}/profiles/<profile>/cordis.patch.yml`
+//      默认取 `agent-default-model` 指定的那一组（provider / model）。
+//   2) 密钥：同名 `apiKeyEnv` 对应的环境变量（本机 dsh 的 `~/.dsh/.env` 即是其来源）。
+//   若你复用的**不是**同一套环境，请任选其一改：
+//      · 运行前覆盖：`DSH_ACP_REAL_LLM_BASE_URL` / `DSH_ACP_REAL_LLM_MODEL` / `DSH_ACP_REAL_LLM_KEY`
+//      · 或直接改你本机的 profile 配置（推荐，一次改好长期生效）
+//   本文件**不写死**任何端点、模型名、家目录路径 —— 仓库里只有「怎么读」，没有「读到什么」。
+//   另：若在别的测试脚本里看到固化的模型名（如 `split-model.test.mjs` / `audit.test.mjs` /
+//   `settings-provider-catalog.test.mjs`），那些只是**解析逻辑的输入样例**、与真实调用无关，无需对应你的环境。
+//
 // 为什么：真实 LLM 用例过去把内网端点、模型 id 写死在源码里。它们属于**本机部署配置**，
 // 不该进仓库。本模块在运行时从 `~/.dsh/profiles/<profile>/cordis.patch.yml` 读取，
 // 仓库里只有「怎么读」，没有「读到什么」。

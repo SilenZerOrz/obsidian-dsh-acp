@@ -1,4 +1,6 @@
 // test/official-bridge-realllm-tool.test.mjs — #96 收尾: 真 LLM tool_call 形状实证.
+// ⚠️ 复用者注意（G-N6c）：端点/模型/密钥取自**你本机** dsh 配置；换环境请用
+//   `DSH_ACP_REAL_LLM_BASE_URL` / `_MODEL` / `_KEY` 覆盖，或改本地 profile（见 test/fixtures/local-llm-config.mjs）。
 //
 // Drives the SAME real reasoning LLM (endpoint/model resolved from the local dsh
 // profile config — never hardcoded) into a REAL tool call through BOTH event

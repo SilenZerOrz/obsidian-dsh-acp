@@ -1,4 +1,6 @@
 // settings-provider-catalog.test.mjs — FE-1 provider catalog parser unit tests.
+// ⚠️ 复用者注意（G-N6c）：本文件的模型名只是**解析逻辑的输入样例**，与真实调用无关，无需改成你的环境；
+//   真 LLM 用例（test:realllm）的端点/模型由本机 dsh 配置解析（见 test/fixtures/local-llm-config.mjs）。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";

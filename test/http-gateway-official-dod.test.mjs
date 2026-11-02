@@ -1,4 +1,6 @@
 // test/http-gateway-official-dod.test.mjs — Phase 3 DoD 三条 (#1/#2/#3) 真 LLM 验证.
+// ⚠️ 复用者注意（G-N6c）：端点/模型/密钥取自**你本机** dsh 配置；换环境请用
+//   `DSH_ACP_REAL_LLM_BASE_URL` / `_MODEL` / `_KEY` 覆盖，或改本地 profile（见 test/fixtures/local-llm-config.mjs）。
 //
 // 复用 fixture (bootSpikeContext + QwenShenkeAdapter + createOfficialAcpRouter) +
 // 复用官方 router + 真实推理模型（端点/模型由本地 dsh profile 配置解析，未写死）。

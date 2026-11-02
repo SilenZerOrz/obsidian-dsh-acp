@@ -1,5 +1,9 @@
 // test/fixtures/qwen-shenke-adapter.mjs — REAL OpenAI-compatible LlmAdapter for #96.
 //
+// ⚠️ 复用者注意（G-N6c）：本适配器的端点、模型名与密钥**全部来自你本机 dsh 配置**
+//   （见同目录 `local-llm-config.mjs` 的解析规则；env `DSH_ACP_REAL_LLM_*` 优先级最高）。
+//   换环境时请改本机 profile 配置或用 env 覆盖，**不要**在本文件里写死端点或模型名。
+//
 // #96 (第二刀副线) drives the SAME real reasoning LLM through BOTH the legacy
 // (LongRuntime → ctx.llm.stream → chunk-mapper) and official (apply() → dsh
 // agent loop) event producers, so we can empirically confirm the field-alignment
