@@ -68,6 +68,75 @@ test("resolveRuntimeMode: official bridge forces spawn (legacy hooks must not bo
   assert.equal(resolveRuntimeMode({ DSH_ACP_USE_OFFICIAL_BRIDGE: "1", DSH_ACP_RUNTIME_MODE: "long" }), "spawn");
 });
 
+test("resolveRuntimeMode: official bridge ACTIVE forces spawn (U3 officialActive)", () => {
+  // U3: auto 模式由调用方（index.mjs）传入探针判定结果。挂载成功 ⇒ legacy long
+  // 必须让位（其 agent/pre-step 监听会打爆 apply() 的中间件链）。
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "1" }, { officialActive: true }), "spawn");
+    assert.equal(
+      resolveRuntimeMode({ DSH_IN_CORDIS: "1", DSH_ACP_RUNTIME_MODE: "long" }, { officialActive: true }),
+      "spawn",
+    );
+    assert.equal(resolveRuntimeMode({ DSH_ACP_USE_OFFICIAL_BRIDGE: "1" }, { officialActive: true }), "spawn");
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
+test("resolveRuntimeMode: auto-NOT-mounted falls back to long under cordis (U3 officialActive:false)", () => {
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "1" }, { officialActive: false }), "long");
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
+test("resolveRuntimeMode: explicit env=1 is authoritative over officialActive:false (U3 防误传)", () => {
+  // 关键安全口径：运维显式设 DSH_ACP_USE_OFFICIAL_BRIDGE=1 时，即便调用方误传
+  // officialActive:false，也绝不允许 legacy long 起在 apply() 已拥有的 ctx 上。
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(
+      resolveRuntimeMode({ DSH_IN_CORDIS: "1", DSH_ACP_USE_OFFICIAL_BRIDGE: "1" }, { officialActive: false }),
+      "spawn",
+    );
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
+test("resolveRuntimeMode: MOCK_LLM wins over officialActive:true (test escape hatch first)", () => {
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeMode({ DSH_ACP_MOCK_LLM: "1" }, { officialActive: true }), "long");
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
+test("resolveRuntimeConfig: passes officialActive through to resolveRuntimeMode", () => {
+  process.env.DSH_ACP_FORCE_P2_AVAILABLE = "1";
+  _resetP2CacheForTesting();
+  try {
+    assert.equal(resolveRuntimeConfig({ DSH_IN_CORDIS: "1" }, { officialActive: true }).mode, "spawn");
+    assert.equal(resolveRuntimeConfig({ DSH_IN_CORDIS: "1" }, { officialActive: false }).mode, "long");
+    assert.equal(resolveRuntimeConfig({ DSH_IN_CORDIS: "1" }).mode, "long"); // 未传 = 旧语义
+  } finally {
+    process.env.DSH_ACP_FORCE_P2_AVAILABLE = "0";
+    _resetP2CacheForTesting();
+  }
+});
+
 test("resolveRuntimeMode: unknown env values fall through", () => {
   assert.equal(resolveRuntimeMode({ DSH_ACP_RUNTIME_MODE: "weird" }), "spawn");
   assert.equal(resolveRuntimeMode({ DSH_IN_CORDIS: "0" }), "spawn");

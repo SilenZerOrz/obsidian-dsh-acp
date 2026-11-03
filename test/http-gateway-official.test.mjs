@@ -1,10 +1,15 @@
 // test/http-gateway-official.test.mjs — Phase 2 first-cut integration.
 //
 // Drives the REAL registerHttpGateway -> handleSessionPrompt OFFICIAL branch
-// (DSH_ACP_USE_OFFICIAL_BRIDGE=1) end-to-end against real apply() + stub LLM,
-// asserting the SSE output the Obsidian/HTTP client would receive:
+// end-to-end against real apply() + stub LLM, asserting the SSE output the
+// Obsidian/HTTP client would receive:
 //   event: sessionUpdate  → data { method:"session/update", params }
 //   event: result         → data { stopReason, usage }
+//
+// U3 (2026-11-03): 这些用例用 `officialEnabled: true` **直接注入挂载决定**，与 env
+// 解耦 —— env 现在只决定 *policy*（on/off/auto），auto 由探针判定后由 index.mjs
+// 传入；故本文件不依赖 DSH_ACP_USE_OFFICIAL_BRIDGE。policy 解析/降级由
+// test/official-bridge-policy.test.mjs 与 test/http-gateway.test.mjs 覆盖。
 //
 // Also asserts NO auto-fallback: with official enabled and a mount/prompt
 // failure, the client gets an SSE error — never a legacy "success".
@@ -71,6 +76,26 @@ function parseSse(writes) {
   }
   return out;
 }
+
+test("official bridge: probe reports officialPolicy.active=true when env forces it on (U3)", async () => {
+  const prev = process.env.DSH_ACP_USE_OFFICIAL_BRIDGE;
+  process.env.DSH_ACP_USE_OFFICIAL_BRIDGE = "1";
+  try {
+    const ws = makeMockWebServer();
+    await registerHttpGateway(ctx, ws, { officialEnabled: true, officialMountConfig: { provider: STUB_PROVIDER, model: STUB_MODEL } });
+    const probe = ws.handlers.get("/acp/proxy/probe");
+    assert.ok(probe, "probe route should be registered");
+    const { req, res, writes } = makeMockReqRes({ method: "GET" });
+    await probe(req, res);
+    const body = JSON.parse(writes.join(""));
+    // env=1 ⇒ on：不依赖探针可用性，active 恒 true。
+    assert.equal(body.officialPolicy.mode, "on");
+    assert.equal(body.officialPolicy.active, true);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_ACP_USE_OFFICIAL_BRIDGE;
+    else process.env.DSH_ACP_USE_OFFICIAL_BRIDGE = prev;
+  }
+});
 
 test("official bridge: single HTTP prompt via DSH_ACP_USE_OFFICIAL_BRIDGE=1 (SSE sessionUpdate + result)", async () => {
   const ws = makeMockWebServer();

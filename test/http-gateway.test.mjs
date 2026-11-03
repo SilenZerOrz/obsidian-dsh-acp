@@ -391,6 +391,44 @@ test("GET /acp/proxy/probe returns JSON with version + longReady=false (no long-
   assert.match(body.mode, /spawn-hint|long/);
 });
 
+test("GET /acp/proxy/probe exposes officialPolicy (U3) with env-driven mode", async () => {
+  const prev = process.env.DSH_ACP_USE_OFFICIAL_BRIDGE;
+  const readProbe = async () => {
+    const ws = makeMockWebServer();
+    const ctx = { logger: { info() {} } };
+    await registerHttpGateway(ctx, ws, { enablePrompt: false });
+    const handler = ws.handlers.get("/acp/proxy/probe");
+    const { req, res, writes } = makeMockReqRes({ method: "GET" });
+    await handler(req, res);
+    return JSON.parse(writes.join(""));
+  };
+  try {
+    // 未设 → auto：无真实 dsh ⇒ 探针不可用 ⇒ 不允许 active（响亮降级的判据）。
+    delete process.env.DSH_ACP_USE_OFFICIAL_BRIDGE;
+    const auto = await readProbe();
+    assert.equal(auto.officialPolicy.mode, "auto");
+    assert.equal(auto.officialPolicy.active, false);
+    assert.equal(auto.officialPolicy.env, "DSH_ACP_USE_OFFICIAL_BRIDGE");
+    assert.match(auto.officialPolicy.reason, /auto/);
+
+    // 显式 =1 → on：不依赖探针，active 恒 true（运维强制开关）。
+    process.env.DSH_ACP_USE_OFFICIAL_BRIDGE = "1";
+    const on = await readProbe();
+    assert.equal(on.officialPolicy.mode, "on");
+    assert.equal(on.officialPolicy.active, true);
+
+    // 显式 =0 → off：强制走 legacy，active 恒 false。
+    process.env.DSH_ACP_USE_OFFICIAL_BRIDGE = "0";
+    const off = await readProbe();
+    assert.equal(off.officialPolicy.mode, "off");
+    assert.equal(off.officialPolicy.active, false);
+    assert.match(off.officialPolicy.reason, /关闭/);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_ACP_USE_OFFICIAL_BRIDGE;
+    else process.env.DSH_ACP_USE_OFFICIAL_BRIDGE = prev;
+  }
+});
+
 // --- prompt handler (validation paths) ------------------------------------
 
 test("POST /acp/proxy/session/prompt without sessionId emits SSE error event", async () => {
