@@ -57,9 +57,10 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import z from "@deepseek-ai/schemastery";
 import { registerSessionPanelRoutes } from "./web/session-panel.mjs";
-import { registerHttpGateway, officialBridgeEnabled, resolveHttpGatewayDefaultModel } from "./lib/http-gateway.mjs";
+import { registerHttpGateway, resolveHttpGatewayDefaultModel } from "./lib/http-gateway.mjs";
 import { createOfficialAcpRouter } from "./lib/acp-official-router.mjs";
 import { probeOfficialBridge } from "./lib/official-acp-bridge.mjs";
+import { officialBridgePolicy, resolveOfficialBridge, officialBridgeLogLine, resolveOfficialActive } from "./lib/official-bridge-policy.mjs";
 import { resolveRuntimeConfig, resolvePermissionConfig } from "./lib/runtime-switch.mjs";
 import { hasP2Apis, probeHostApiSurface, hostApiSurfaceSummary } from "./lib/version-detect.mjs";
 
@@ -75,7 +76,7 @@ export class DshAcpService extends Service {
 	 * @param ctx - cordis context this service is mounted on.
 	 * @param config - plugin config.
 	 */
-	constructor(ctx, config = {}) {
+	constructor(ctx, config = {}, internal = {}) {
 		super(ctx, "dsh.acp");
 		this.config = config;
 		this._stopped = false;
@@ -83,6 +84,13 @@ export class DshAcpService extends Service {
 		this._restartTimer = null;
 		this._longRt = null;
 		this._longReady = false; // [H1 / G1b-5] long runtime 就绪标志（跨作用域，供 trigger 闸）
+		// U3（2026-11-03）：官方桥启用策略与「挂载结果」在 apply() 里于构造前解析好，
+		// 经 internal 注入 —— trigger() 定义在类作用域、看不到 apply() 的局部变量，
+		// 若直接引用 apply() 的 const 会在 boot 触发时抛 ReferenceError（node --check 查不出）。
+		// 独立实例化（无 internal）时回退：按 env 解析策略、挂载结果视为「未挂载」。
+		this._officialPolicy = internal.officialPolicy ?? officialBridgePolicy(process.env);
+		this._officialMountOutcome = internal.officialMountOutcome
+			?? Promise.resolve({ mounted: false, reason: "standalone instance (no mount outcome)" });
 
 		// headless profile MUST stay spawn — long mode requires cordis ctx,
 		// which the cordis plugin already has, but a headless profile is meant
@@ -106,7 +114,7 @@ export class DshAcpService extends Service {
 			// 在 plugin apply 时不一定就绪），拿到后 await()。失败 fallback
 			// 老路径 app/ready + 5s setTimeout 兜底，确保 0.1.5-rc.x 也 work。
 			let _bootTriggered = false;
-			const trigger = (reason) => {
+			const trigger = async (reason) => {
 				if (_bootTriggered) return;
 				// [H1 / G1b-5] long 已就绪则跳过整条 spawn 兜底（不 spawn、不与 long 双起）。
 				if (this._longReady) {
@@ -118,7 +126,20 @@ export class DshAcpService extends Service {
 				_acpLog("info", `boot trigger: ${reason} — resolving runtime mode`);
 				const env = { ...process.env, DSH_IN_CORDIS: "1" };
 				if (config.runtime?.mode) env.DSH_ACP_RUNTIME_MODE = config.runtime.mode;
-				const rtConfig = resolveRuntimeConfig(env);
+				// U3（2026-11-03）：官方桥是否生效，以「挂载点的实测结果」为准 ——
+				// 两者必须互斥（legacy long 的 agent/pre-step 会打爆 apply() 的中间件链）。
+				//   · env=1（显式）→ 直接 spawn（保留旧语义，不等挂载结果）
+				//   · auto        → 等挂载结果（最长 2s；超时按「未挂载」处理 → legacy long）
+				let mountOutcome = null;
+				if (this._officialPolicy === "auto") {
+					mountOutcome = await Promise.race([
+						this._officialMountOutcome,
+						new Promise((r) => setTimeout(() => r({ mounted: false, reason: "mount outcome timeout (2s)" }), 2000)),
+					]);
+					_acpLog("info", `[U3] official mount outcome: mounted=${mountOutcome?.mounted === true} (${mountOutcome?.reason ?? "n/a"})`);
+				}
+				const officialActive = resolveOfficialActive(this._officialPolicy, mountOutcome);
+				const rtConfig = resolveRuntimeConfig(env, { officialActive });
 				const useLong = rtConfig.mode === "long";
 				const msg = `effective runtime mode = ${rtConfig.mode} (P2 APIs available: ${hasP2Apis()}; spawnFallback: ${rtConfig.spawnFallback})`;
 				_acpLog("info", msg);
@@ -423,7 +444,26 @@ export function apply(ctx, config) {
 	// 不再需要 apply() 兜底同步 spawn。下游 web 面板路由 (ctx.inject(["webServer"]))
 	// 仍依赖 ctx，所以 svc 必须真是 DshAcpService 实例（不能是 stub），让 dispose
 	// 与 web 路由 hook 正常工作。
-	const svc = new DshAcpService(ctx, config);
+	// U3（2026-11-03）：官方桥启用策略必须在**构造 svc 之前**解析 —— trigger() 与
+	// 挂载门都依赖它，且 trigger 定义在类作用域（看不到 apply() 的局部 const）。
+	//   off   → 不挂载（走 legacy long）
+	//   on    → 强制挂载（env=1，旧语义）
+	//   auto  → 进入挂载门后用探针判定；不可用则**响亮降级**到 legacy long
+	// `_officialMountOutcome` 把「实际是否挂上」告诉 boot trigger，使 runtime 与挂载互斥。
+	const _officialPolicy = officialBridgePolicy(process.env);
+	let _settleOfficialMount;
+	const _officialMountOutcome = new Promise((resolve) => { _settleOfficialMount = resolve; });
+	const settleOfficialMount = (outcome) => {
+		try { _settleOfficialMount(outcome); } catch { /* best-effort */ }
+	};
+	if (_officialPolicy === "off") {
+		settleOfficialMount({ mounted: false, reason: "env 显式关闭（=0）" });
+	}
+
+	const svc = new DshAcpService(ctx, config, {
+		officialPolicy: _officialPolicy,
+		officialMountOutcome: _officialMountOutcome,
+	});
 
 	// [H1 / G1b-4] long 启动改造：apply 同步期注册 inject，等 6 服务到齐。
 	// F3b 失败点是在 setTimeout 里调 ctx.inject（ctx 已 dispose）——这里在 apply
@@ -472,7 +512,7 @@ export function apply(ctx, config) {
 	// agents/sessions；logger 为 cordis 内置 accessor）——与 webServer 无关。
 	// 故用独立 inject 门（deps 不含 logger —— 它是内置 mixin，inject 永不 fire），
 	// 在 apply 同步期注册、服务到齐即挂载官方桥；svcCtx 即为该 inject 回调的活 ctx。
-	if (officialBridgeEnabled() && typeof ctx.inject === "function") {
+	if (_officialPolicy !== "off" && typeof ctx.inject === "function") {
 		// [H2f] 合并门：deps 加 webServer，使官方桥挂载与 HTTP gateway 注册共用同一个 svcCtx。
 		// 原两门分离（H2c 门 + webServer 门）导致 handleSessionPrompt 拿到的是外层插件 ctx
 		// （缺 4 服务）+ officialEnabled:false → 永不走官方桥（H2f-pre3 定性）。
@@ -481,6 +521,16 @@ export function apply(ctx, config) {
 			// 必须在**任何 await 之前**执行——否则 await 期间 cordis 把该 inject 子 fiber
 			// 置 INACTIVE，apply 建 effect 时抛 "cannot create effect on inactive context"（F3b 同族）。
 			let router = null;
+			// U3 真机实测更正（2026-11-03 02:00）：曾在此加「legacy long 已就绪则跳过挂载」的
+			// 互斥保护（提前 return）——真机证明它是**回归**：本 host 上 legacy long 的 inject
+			// 门（6 deps）总先于官方桥门（+sessionPersistence/webServer）就绪，于是每次都跳过
+			// 挂载并连带跳过下面的 registerHttpGateway → /acp/proxy/* 全部 404。
+			// 且 U3 前的既有可用配置本就是「两者并存」（官方桥负责 prompt 路由，legacy long
+			// 只是被 init 过），说明 runtime-switch 注释里担心的 agent/pre-step 链冲突在
+			// dsh 0.2.6-dev 上并未发生。故此处**不再提前 return**：挂载与否只由 policy + 探针
+			// 决定，HTTP gateway 无论如何都要注册（officialEnabled = mounted）。
+			// （若将来真出现 pre-step 冲突，正确修法是让 longDeps inject 让位于官方桥，而不是
+			//   在这里跳过 gateway 注册。）
 			try {
 				router = createOfficialAcpRouter(svcCtx, {}); // 内部调 apply(svcCtx, {stream})，同步建 effect
 				svc._officialRouter = router;
@@ -491,31 +541,46 @@ export function apply(ctx, config) {
 
 			// [H2f] 同步注册 HTTP gateway —— 用同一 svcCtx（含 4 服务 + webServer），officialEnabled:true。
 			// 这样 handleSessionPrompt 的 official.getRouter()/probe 都基于能解析服务的 svcCtx。
+			// U3 auto 判定：探针为准（importable && servicesReady）。env=1 时跳过判定。
+			let probe = null;
+			try {
+				probe = await probeOfficialBridge(svcCtx);
+			} catch (e) {
+				_acpLog("warn", "[dsh-acp] [H2f] probe failed: " + (e?.message ?? e));
+			}
+			if (probe) {
+				_acpLog("info", "[dsh-acp] [H2f] probe: " + JSON.stringify({
+					importable: probe.importable, servicesReady: probe.servicesReady,
+					missing: probe.missingServices, advisory: probe.advisoryServices,
+					applySignature: probe.applySignature, error: probe.error,
+				}));
+			}
+			const decision = _officialPolicy === "on"
+				? resolveOfficialBridge({ mode: "on" })
+				: resolveOfficialBridge({ mode: "auto", probe });
+			const mounted = router !== null && decision.active;
+			if (!mounted) {
+				// 「响亮降级」：绝不静默 —— 一行可 grep 的 warn，说明为什么走 legacy。
+				_acpLog("warn", officialBridgeLogLine({ ...decision, active: false }));
+			} else {
+				_acpLog("info", officialBridgeLogLine({ ...decision, active: true }));
+			}
+			settleOfficialMount({ mounted, reason: decision.reason });
+
 			if (svcCtx && svcCtx.webServer && typeof svcCtx.webServer.register === "function") {
 				try {
 					if (config.enableWebPanel !== false) registerSessionPanelRoutes(svcCtx, svcCtx.webServer);
-					await registerHttpGateway(svcCtx, svcCtx.webServer, { officialEnabled: true });
-					_acpLog("info", "[dsh-acp] [H2f] HTTP gateway registered (officialEnabled: true)");
+					await registerHttpGateway(svcCtx, svcCtx.webServer, { officialEnabled: mounted });
+					_acpLog("info", `[dsh-acp] HTTP gateway registered (officialEnabled: ${mounted})`);
 				} catch (e) {
 					_acpLog("warn", "[dsh-acp] [H2f] registerHttpGateway failed: " + (e?.message ?? e));
 				}
 			} else {
 				_acpLog("warn", "[dsh-acp] [H2f] webServer unavailable in svcCtx; HTTP gateway not registered");
 			}
-
-			// [H2f] probe 后置（纯诊断/日志；不阻塞 router/gateway 建立）
-			try {
-				const probe = await probeOfficialBridge(svcCtx);
-				_acpLog("info", "[dsh-acp] [H2f] probe: " + JSON.stringify({
-					importable: probe.importable, servicesReady: probe.servicesReady,
-					missing: probe.missingServices, advisory: probe.advisoryServices,
-					applySignature: probe.applySignature, error: probe.error,
-				}));
-			} catch (e) {
-				_acpLog("warn", "[dsh-acp] [H2f] probe failed: " + (e?.message ?? e));
-			}
 		});
 	} else if (config.enableWebPanel !== false && typeof ctx.inject === "function") {
+		settleOfficialMount({ mounted: false, reason: `official 门未进入（policy=${_officialPolicy}, ctx.inject=${typeof ctx.inject === "function"})` });
 		// [H2f] legacy fallback：官方桥未启用时，仍挂 web 面板路由 + /acp/proxy/*（legacy long 路由）。
 		ctx.inject(["webServer"], async (webCtx) => {
 			if (webCtx && webCtx.webServer && typeof webCtx.webServer.register === "function") {
