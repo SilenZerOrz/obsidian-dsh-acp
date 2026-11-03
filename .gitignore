@@ -24,8 +24,10 @@ tmp-cache/
 # Alternate package-manager lockfiles (project canonical = package-lock.json)
 pnpm-lock.yaml
 
-# Local-only dev docs (requirements / planning). Kept off git until we decide
-# to commit them ("后续补上传 git"). Tracked only on the developer's machine.
+# Local-only dev docs (requirements / planning / specs / verification records).
+# 原则（用户 2026-11-03 裁定）：docs/ **只存本地，不上传 GitHub** —— 含 docs/规范/**。
+# 已知取舍：仓库内对 docs 的引用（例如下文 test/fixtures 段引用的 发布SOP.md 规则）
+# 对 clone 者不可见；docs 的事实快照以本机为准。
 docs/
 
 # npm pack test artifacts (do NOT commit)
