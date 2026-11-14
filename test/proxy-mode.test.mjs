@@ -383,10 +383,14 @@ test("forwardPromptViaHttp: SSE 'request' event forwards to onRequest + POSTs re
     // sessionUpdate was forwarded
     assert.equal(updates.length, 1);
     assert.equal(updates[0].params.x, 1);
-    // onRequest was invoked with the server's method + params
+    // onRequest was invoked with the server's method + params.
+    // R148 (2026-11-15): `sessionId` is now rewritten to the CLIENT session id
+    // before forwarding (the fixture's request carries none, which also counts
+    // as a mismatch → the client id is filled in). See
+    // test/r148-request-sessionid-rewrite.test.mjs for the full contract.
     assert.deepEqual(onRequestCalled, {
       method: "session/request_permission",
-      params: { toolCallId: "tc1" },
+      params: { toolCallId: "tc1", sessionId: "sess-1" },
     });
     // The reply POST carried ok=true + the result + the correlationId
     assert.equal(observedPermissionBodies.length, 1);

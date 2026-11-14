@@ -53,6 +53,7 @@ import { loadProviderCatalog } from "./lib/settings-provider-catalog.mjs";
 import { validateCwd } from "./lib/cwd-validator.mjs";
 import { hasHeadlessJson } from "./lib/version-detect.mjs";
 import { readProfileDefaultModel } from "./lib/http-gateway.mjs";
+import { PACKAGE_VERSION } from "./lib/package-version.mjs";
 import { PERMISSION_MODES } from "./lib/permission-gate.mjs";
 import { createHeadlessParser } from "./lib/headless-json-parser.mjs";
 import { createUpdateTranslator } from "./lib/acp-tool-translation.mjs";
@@ -824,6 +825,33 @@ function createAgent() {
         protocolVersion: 1,
         agentCapabilities: {
           loadSession: true,
+          // R145 (卡 -75): declare BOTH capability groups explicitly instead of
+          // omitting them. The values are the HONEST support surface of this
+          // adapter, verified by reading the prompt plumbing — not what would
+          // make a client UI look good:
+          //
+          //   image / audio / embeddedContext: every prompt path funnels the
+          //   wire blocks through extractPromptText(), which keeps ONLY
+          //   `type: "text"` blocks and silently drops image / audio /
+          //   resource / resource_link (see this file and
+          //   lib/long-runtime.mjs). Declaring any of them true would tell
+          //   clients to send content we then discard.
+          //
+          //   mcp http / sse / acp: `mcpServers` is accepted by the permissive
+          //   session/new/load schemas and then never consumed — this adapter
+          //   mounts no MCP servers on any transport.
+          //
+          // When image/resource support is actually implemented, flip the
+          // corresponding boolean here in the same commit.
+          promptCapabilities: {
+            image: false,
+            audio: false,
+            embeddedContext: false,
+          },
+          mcpCapabilities: {
+            http: false,
+            sse: false,
+          },
           sessionCapabilities: {
             list: {},
             delete: {},
@@ -832,7 +860,10 @@ function createAgent() {
             close: {},
           },
         },
-        agentInfo: { name: "dsh-acp", title: "DeepSeek Harness", version: "0.2.0" },
+        // R145: read from package.json instead of a hardcoded string — this
+        // field is ACP-client visible and had drifted to "0.2.0" while the
+        // package shipped 0.4.0.
+        agentInfo: { name: "dsh-acp", title: "DeepSeek Harness", version: PACKAGE_VERSION },
       };
     },
 

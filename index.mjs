@@ -158,7 +158,17 @@ export class DshAcpService extends Service {
 				} catch {
 					// probe is diagnostic only; never let it affect boot
 				}
-				const boot = useLong ? this.startLong() : this.start();
+				// T5 (0.5.0): when the official bridge is active, apply() OWNS the ctx
+				// (it mounts its own agent/pre-step + approval/request listeners). The
+				// legacy long-runtime's listeners would then compete for the SAME
+				// events, and its approval/request listener swallows the approval
+				// dispatch: the bridging never reaches the official ACP path, so
+				// `session/request_permission` is never sent and the turn hangs at
+				// `approval/asked` (no `approval/decided`) — verified on the live host
+				// 2026-11-15. Skip the legacy hooks in official mode; the official
+				// bridge translates `approval/request` into `session/request_permission`
+				// itself (dsh-acp/lib/index.js:1093).
+				const boot = useLong ? this.startLong({ registerAgentHooks: !officialActive }) : this.start();
 				boot
 					.then((rt) => {
 						_acpLog("info", `boot resolved: useLong=${useLong} rt=${rt ? rt.constructor.name : "null"}`);
@@ -304,7 +314,7 @@ export class DshAcpService extends Service {
 	 *
 	 * Returns the singleton LongRuntime instance on success.
 	 */
-	async startLong() {
+	async startLong(opts = {}) {
 		if (this._longRt) return this._longRt;
 		const { getLongRuntime } = await import("./lib/long-runtime.mjs");
 		const rt = getLongRuntime();
@@ -314,6 +324,8 @@ export class DshAcpService extends Service {
 			permissionConfig: resolvePermissionConfig(),
 			cwd: process.cwd(),
 			model: resolveHttpGatewayDefaultModel(), // [H3c-1] seed defaultModel 兜底（修法 1）
+			// T5: official mode leaves the ctx to apply() — see the call site.
+			registerAgentHooks: opts?.registerAgentHooks !== false,
 		});
 		this._longRt = rt;
 		return rt;
