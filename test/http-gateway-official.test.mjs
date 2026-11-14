@@ -274,3 +274,52 @@ test("official bridge: server-initiated session/request_permission reaches the S
     try { await ownBoot.dispose(); } catch {}
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GE-2 (2026-11-15): the SSE `error` payload must carry the upstream `data`.
+//
+// Before GE-2 the payload was `{ message }` only, so when the SDK took its
+// non-RequestError fallback — `{code:-32603, message:"Internal error",
+// data:{details:"<real reason>"}}` — the diagnosis lived in `data` and the
+// gateway dropped it. That is exactly the 3080 symptom: a constant
+// `Internal error` with no way to see why.
+//
+// Determinism: mount the official bridge against a provider that is NOT
+// registered on the ctx. `ctx.llm.stream()` then has no adapter, the agent loop
+// fails, and the SDK emits the fallback error frame. Nothing about the stub's
+// text output is involved, so this cannot pass by accident.
+// ─────────────────────────────────────────────────────────────────────────────
+test("GE-2: SSE error carries the upstream error data (not just message)", async () => {
+  const ws = makeMockWebServer();
+  await registerHttpGateway(ctx, ws, {
+    officialEnabled: true,
+    // Deliberately unregistered: only STUB_PROVIDER is registered in before().
+    officialMountConfig: { provider: "ge2-unregistered-provider", model: "ge2-unregistered-model" },
+  });
+  const promptHandler = ws.handlers.get("/acp/proxy/session/prompt");
+  assert.ok(promptHandler, "prompt route should be registered");
+
+  const body = JSON.stringify({
+    sessionId: "http-sess-ge2-err",
+    prompt: [{ type: "text", text: "this turn is expected to fail upstream" }],
+  });
+  const { req, res, writes } = makeMockReqRes({ method: "POST", body });
+  const ended = new Promise((r) => req.on("__res_ended__", r));
+  await promptHandler(req, res);
+  await Promise.race([ended, new Promise((_, rej) => setTimeout(() => rej(new Error("prompt SSE never ended")), 30000))]);
+
+  const errors = parseSse(writes).filter((e) => e.event === "error");
+  assert.equal(errors.length >= 1, true, `expected an SSE error event, got ${JSON.stringify(parseSse(writes).map((e) => e.event))}`);
+
+  const payload = errors[0].data;
+  assert.ok(payload.data !== undefined, `SSE error must carry \`data\`, got ${JSON.stringify(payload)}`);
+  assert.match(
+    JSON.stringify(payload.data),
+    /no adapter registered/,
+    `data must carry the real upstream reason, got ${JSON.stringify(payload.data)}`,
+  );
+  assert.equal(payload.code, -32603, `code must be surfaced too, got ${JSON.stringify(payload.code)}`);
+  // The framing contract is unchanged: `event: error` + one `data:` line.
+  const raw = writes.join("");
+  assert.match(raw, /event: error\ndata: \{.*\}\n\n/, `error framing must stay "event: error" + single-line data, got ${JSON.stringify(raw.slice(0, 400))}`);
+});
