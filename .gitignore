@@ -82,6 +82,7 @@ test/*
 !test/acp-stdout-purity.test.mjs
 !test/acp-official-router-permission.test.mjs
 !test/session-management.test.mjs
+!test/official-bridge-probe-matrix.test.mjs
 !test/acp-available-commands.test.mjs
 !test/context-window.test.mjs
 scripts/
