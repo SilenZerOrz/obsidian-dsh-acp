@@ -82,6 +82,8 @@ test/*
 !test/acp-stdout-purity.test.mjs
 !test/acp-official-router-permission.test.mjs
 !test/session-management.test.mjs
+!test/acp-available-commands.test.mjs
+!test/context-window.test.mjs
 scripts/
 # acp-feature-test.mjs 已入库（2026-10-30）：它是 test:protocol / test:long 的唯一入口，
 # 且承载第 1 项 #1(SPEC) / #3(弱断言) 修复。不入库 = 新克隆者两套测试直接失败。

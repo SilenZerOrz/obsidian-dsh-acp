@@ -141,7 +141,11 @@ test("status.step_end.usage → usage_update with used/size/inputTokens/outputTo
   const [u1] = perLine[6];
   assert.equal(u1.sessionUpdate, "usage_update");
   assert.equal(u1.used, 7768);
-  assert.equal(u1.size, 0);
+  // P2-3 (2026-11-15): the spawn path used to hardcode size: 0. It is now
+  // auto-resolved, so the pin is "a number, and > 0 whenever a ceiling is
+  // reachable". The resolution rules are covered by test/context-window.test.mjs.
+  assert.equal(typeof u1.size, "number");
+  assert.ok(u1.size >= 0, `size must never be negative, got ${u1.size}`);
   assert.equal(u1.inputTokens, 7681);
   assert.equal(u1.outputTokens, 87);
 
@@ -283,7 +287,10 @@ test("integration: usage_update passes through the translator verbatim (extra fi
   const [legacy] = translator.translate(official);
   assert.equal(legacy.sessionUpdate, "usage_update");
   assert.equal(legacy.used, 150);
-  assert.equal(legacy.size, 0);
+  // P2-3: size is auto-resolved now (was the literal 0) — the translator must
+  // still pass it through unchanged, whatever the parser resolved.
+  assert.equal(typeof legacy.size, "number");
+  assert.equal(legacy.size, official.size, "translator passes the ceiling through verbatim");
   assert.equal(legacy.inputTokens, 100, "extra keys preserved for clients that read them");
   assert.equal(legacy.outputTokens, 50);
 });

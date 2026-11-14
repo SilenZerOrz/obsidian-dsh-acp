@@ -453,7 +453,14 @@ function runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, force
     let translator = null;
     let stdoutBuf = ""; // accumulates decoded bytes between newlines
     if (useStructured) {
-      parser = createHeadlessParser();
+      // P2-3 (R142): the --json stream reports no context-window ceiling, so
+      // hand the parser the model this spawn runs and let it resolve the
+      // usage_update `size` (was hardcoded 0 → "Infinity %" in Obsidian).
+      // `modelOverride` is the session's `provider/model`; absent ⇒ the parser
+      // falls back to the profile/env defaults.
+      parser = createHeadlessParser(
+        modelOverride ? (() => { const s = splitModel(modelOverride); return { provider: s.provider, model: s.model }; })() : undefined,
+      );
       translator = createUpdateTranslator();
     }
 
@@ -827,9 +834,20 @@ function createAgent() {
       };
     },
 
-    async newSession(params) {
+    async newSession(params, ctx) {
       const cwd = validateCwdParam(params.cwd, "session/new");
       const rec = createSession({ cwd: cwd ?? params.cwd, title: params._meta?.title });
+      // P1-3 (R132): actually EMIT the command palette. Until now the agent
+      // only defined importCmd() and mentioned it in a comment — no
+      // available_commands_update frame ever reached the client, so Obsidian
+      // had nothing to render for `/import`.
+      //
+      // Ordering: the SDK sends the session/new RESPONSE only after this
+      // handler resolves (`registerAppRequest`: `await handler(...)` →
+      // `responder.respond(...)`). Awaiting the notification here would put it
+      // AHEAD of the response and the client would not yet know the sessionId.
+      // Defer to `setImmediate` so the response lands first, then the frame.
+      this.emitAvailableCommands(ctx, rec.id);
       return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
@@ -880,12 +898,64 @@ function createAgent() {
     // FEAT: advertise an "import session" command so history pages can render a
     // button. Obsidian surfaces these via the available_commands_update
     // session update; the actual import runs on `/import <path>` in prompt.
+    //
+    // P1-3 (R132): this list is the payload of that frame — see
+    // availableCommands() / emitAvailableCommands() below, which wire it into
+    // session/new.
     importCmd() {
       return {
         name: "import",
         description: "Import an ACP-protocol (claude / Obsidian) session from a JSON file",
         input: { type: "unstructured" },
       };
+    },
+
+    /**
+     * P1-3 (R132): the full command list advertised to the client.
+     *
+     * Kept separate from importCmd() so the frame payload has ONE producer and
+     * new commands are added in one place. The ACP schema requires `name` +
+     * `description`; `input` is optional (`zAvailableCommand`, zod.gen.js:1888).
+     */
+    availableCommands() {
+      return [this.importCmd()];
+    },
+
+    /**
+     * P1-3 (R132): send `session/update { sessionUpdate: "available_commands_update" }`.
+     *
+     * Fire-and-forget by design:
+     *   - the frame is advisory (UI affordance only) — a client that ignores it
+     *     loses nothing functional, so it must never fail session/new;
+     *   - it is deferred one macrotask so the session/new RESPONSE reaches the
+     *     wire first (clients key their command palette off a known sessionId);
+     *   - errors go to stderr, never stdout (stdout is the JSON-RPC channel —
+     *     see the CRITICAL note in listSessions()).
+     */
+    emitAvailableCommands(ctx, sessionId) {
+      if (!ctx || !ctx.client || typeof ctx.client.notify !== "function") return;
+      const payload = {
+        sessionId,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: this.availableCommands(),
+        },
+      };
+      setImmediate(() => {
+        try {
+          Promise.resolve(
+            ctx.client.notify(methods.client.session.update, payload),
+          ).catch((e) => {
+            try {
+              process.stderr.write(`[dsh-acp] available_commands_update failed: ${e?.message ?? e}\n`);
+            } catch { /* stdout/stderr gone — nothing left to report to */ }
+          });
+        } catch (e) {
+          try {
+            process.stderr.write(`[dsh-acp] available_commands_update threw: ${e?.message ?? e}\n`);
+          } catch { /* ignore */ }
+        }
+      });
     },
 
     async deleteSession(params) {
@@ -1486,7 +1556,9 @@ function runAcp() {
   const h = createAgent();
   const connection = acpAgent({ name: "dsh-acp" })
     .request({ method: methods.agent.initialize, params: permissiveAny }, (ctx) => h.initialize(ctx.params))
-    .request({ method: methods.agent.session.new, params: permissiveNewSession }, (ctx) => h.newSession(ctx.params))
+    // P1-3 (R132): pass the handler context too — newSession() needs
+    // ctx.client to emit available_commands_update after the response lands.
+    .request({ method: methods.agent.session.new, params: permissiveNewSession }, (ctx) => h.newSession(ctx.params, ctx))
     .request({ method: methods.agent.session.load, params: permissiveLoadSession }, (ctx) => h.loadSession(ctx.params))
     .request({ method: methods.agent.session.list, params: permissiveAny }, (ctx) => h.listSessions(ctx.params))
     .request({ method: methods.agent.session.delete, params: permissiveAny }, (ctx) => h.deleteSession(ctx.params))

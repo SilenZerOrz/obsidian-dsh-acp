@@ -266,7 +266,12 @@ test("usage chunk emits usage_update with totalTokens", () => {
   );
   assert.equal(u.sessionUpdate, "usage_update");
   assert.equal(u.used, 15);
-  assert.equal(u.size, 0);
+  // P2-3 (2026-11-15): `size` used to be asserted as the literal 0 ("unknown").
+  // It is now AUTO-RESOLVED (profile contextWindow → dsh's compiled default),
+  // so the contract is "a positive number or 0", never a dropped key. The
+  // explicit resolution rules live in test/context-window.test.mjs.
+  assert.equal(typeof u.size, "number");
+  assert.ok(u.size >= 0);
 });
 
 test("usage chunk with missing totalTokens → used=0", () => {
