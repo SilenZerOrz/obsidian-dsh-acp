@@ -461,7 +461,9 @@ function runDshInner(prompt, cwd, onChunk, signal, modelOverride, onFrame, force
       parser = createHeadlessParser(
         modelOverride ? (() => { const s = splitModel(modelOverride); return { provider: s.provider, model: s.model }; })() : undefined,
       );
-      translator = createUpdateTranslator();
+      // P1-2: hand the reporter layer the session cwd so tool-card titles show
+      // project-relative paths ("Read src/a.ts") like claude-agent-acp.
+      translator = createUpdateTranslator({ cwd });
     }
 
     function emitFromStructuredLine(line) {

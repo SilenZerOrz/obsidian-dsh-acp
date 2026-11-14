@@ -256,9 +256,17 @@ test("integration: parser → translator emits tool_call START (pending) + compl
   );
   assert.ok(start, "must produce a passthrough tool_call{pending} start frame");
   assert.ok(completed, "must produce a tool_call_update{completed}");
-  assert.equal(start.title, "bash", "title passes through verbatim");
+  // P1-2 (2026-11-04): the reporter layer rewrites the title from the tool
+  // NAME to the tool's own subject — for bash that is the command itself
+  // (claude-agent-acp BashReporter parity), and the description becomes the
+  // card body. Before P1-2 this asserted the bare name "bash".
+  assert.equal(start.title, "pwd", "P1-2: bash title = the command (reporter layer)");
+  assert.equal(start.name, "bash", "the raw tool name is still carried");
   assert.equal(start.toolCallId, "call_e855e62c49734ea3ba04b9bb");
   assert.equal(start.kind, "execute", "P0-3: kind inferred (bash → execute)");
+  assert.deepEqual(start.content, [
+    { type: "content", content: { type: "text", text: "Print current working directory" } },
+  ]);
   assert.deepEqual(start.rawInput, {
     command: "pwd",
     description: "Print current working directory",
