@@ -85,6 +85,7 @@ test/*
 !test/session-management.test.mjs
 !test/tool-call-reporters.test.mjs
 !test/acp-available-commands.test.mjs
+!test/acp-session-info-update.test.mjs
 !test/r145-initialize-capabilities.test.mjs
 !test/agent-preset-shim.test.mjs
 !test/r148-request-sessionid-rewrite.test.mjs

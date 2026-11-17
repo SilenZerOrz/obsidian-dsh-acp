@@ -772,6 +772,26 @@ function listSessionRecords(cwd) {
   return indexRecords.concat(scanned.filter((s) => !seen.has(s.id)));
 }
 
+/**
+ * R146 (卡 -76): best-effort ISO-8601 "last activity" for a session record, the
+ * value `session_info_update.updatedAt` carries.
+ *
+ * `rec.createdAt` is already ISO; a recorded turn carries `at` in ms since the
+ * epoch (archive-store.mjs recordMessage), which is the most recent activity
+ * we have. Returns undefined rather than a bogus timestamp.
+ */
+function sessionUpdatedAt(rec) {
+  const msgs = Array.isArray(rec?.messages) ? rec.messages : [];
+  const lastAt = msgs.length ? msgs[msgs.length - 1]?.at : undefined;
+  if (typeof lastAt === "number" && Number.isFinite(lastAt)) return new Date(lastAt).toISOString();
+  const created = rec?.createdAt;
+  if (typeof created === "string" && created) {
+    const ms = Date.parse(created);
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  }
+  return undefined;
+}
+
 // ---- FEAT: session summary (one-line LLM preview) -------------------------
 // Regenerate a session's one-line summary when its message count grows beyond
 // a threshold since the last generation. Runs as a non-blocking background
@@ -881,12 +901,17 @@ function createAgent() {
       // AHEAD of the response and the client would not yet know the sessionId.
       // Defer to `setImmediate` so the response lands first, then the frame.
       this.emitAvailableCommands(ctx, rec.id);
+      // R146 (卡 -76): tell the client the session's title + last activity, so
+      // the panel header does not stay on its placeholder.
+      this.emitSessionInfo(ctx, rec);
       return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
-    async loadSession(params) {
+    async loadSession(params, ctx) {
       const cwd = validateCwdParam(params.cwd, "session/load");
       const rec = ensureSession(params.sessionId, cwd ?? params.cwd);
+      // R146: a resumed/loaded session refreshes the panel title too.
+      this.emitSessionInfo(ctx, rec);
       return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
@@ -991,21 +1016,71 @@ function createAgent() {
       });
     },
 
+    /**
+     * R146 (卡 -76): send `session/update { sessionUpdate: "session_info_update" }`.
+     *
+     * ACP clients (Obsidian Agent Client 0.13.2 parses it at
+     * `main.js` "session_info_update" → emits a `session_info_update`
+     * SessionUpdate) use this frame to refresh the session title / last-active
+     * timestamp in the panel. We never sent it, so the title stayed whatever
+     * the client cached at `session/new`.
+     *
+     * Payload shape: `{ title?, updatedAt? }` (zSessionInfoUpdate,
+     * zod.gen.d.ts:7579) — every field optional, so a partial update is valid.
+     * We send the record's title when it has one and the last-activity time.
+     *
+     * Fire-and-forget for the same reasons as emitAvailableCommands():
+     *   - advisory frame — a client that ignores it loses only a UI refresh;
+     *   - deferred one macrotask so the session/new (or load/resume/fork)
+     *     RESPONSE reaches the wire first — clients key updates off a known
+     *     sessionId (registerAppRequest: `await handler(...)` → respond);
+     *   - errors go to stderr, never stdout (stdout is the JSON-RPC channel).
+     */
+    emitSessionInfo(ctx, rec) {
+      if (!ctx || !ctx.client || typeof ctx.client.notify !== "function" || !rec?.id) return;
+      const title = typeof rec.title === "string" && rec.title ? rec.title : undefined;
+      const updatedAt = sessionUpdatedAt(rec);
+      if (!title && !updatedAt) return;
+      const update = { sessionUpdate: "session_info_update" };
+      if (title) update.title = title;
+      if (updatedAt) update.updatedAt = updatedAt;
+      const payload = { sessionId: rec.id, update };
+      setImmediate(() => {
+        try {
+          Promise.resolve(
+            ctx.client.notify(methods.client.session.update, payload),
+          ).catch((e) => {
+            try {
+              process.stderr.write(`[dsh-acp] session_info_update failed: ${e?.message ?? e}\n`);
+            } catch { /* stdout/stderr gone — nothing left to report to */ }
+          });
+        } catch (e) {
+          try {
+            process.stderr.write(`[dsh-acp] session_info_update threw: ${e?.message ?? e}\n`);
+          } catch { /* ignore */ }
+        }
+      });
+    },
+
     async deleteSession(params) {
       storeDelete(params.sessionId);
       return { deleted: params.sessionId };
     },
 
-    async resumeSession(params) {
+    async resumeSession(params, ctx) {
       const rec = getSession(params.sessionId);
       if (!rec) throw new RequestError(-32602, `session ${params.sessionId} not found`);
+      // R146: the client that resumes a session may not hold its title.
+      this.emitSessionInfo(ctx, rec);
       return { sessionId: rec.id, modes: initializeModes(rec), configOptions: sessionConfigOptions(rec) };
     },
 
-    async forkSession(params) {
+    async forkSession(params, ctx) {
       const cwd = validateCwdParam(params.cwd, "session/fork");
       const rec = forkSession(params.sessionId, cwd ?? params.cwd);
       if (!rec) throw new RequestError(-32602, `source session ${params.sessionId} not found`);
+      // R146: a fork gets its own title ("Fork: …") — publish it.
+      this.emitSessionInfo(ctx, rec);
       return { sessionId: rec.id, modes: initializeModes(rec) };
     },
 
@@ -1251,6 +1326,9 @@ function createAgent() {
             process.stderr.write(`[dsh-acp] tool-only fallback: reasoning-only turn (thought=${proxyThoughtFrames}, visibleLen=0)\n`);
           }
         }
+        // R146 (卡 -76): refresh `updatedAt` in the panel after a turn lands —
+        // recordMessage() above stamped the new activity time.
+        try { this.emitSessionInfo(ctx, getSession(session.id)); } catch { /* best-effort */ }
         return proxyResult;
       }
 
@@ -1292,6 +1370,8 @@ function createAgent() {
               reasoningEffort: session.reasoningEffort ?? undefined,
             },
           });
+          // R146: same per-turn refresh on the mock/long path.
+          try { this.emitSessionInfo(ctx, getSession(session.id)); } catch { /* best-effort */ }
           return {
             stopReason: result.stopReason,
             usage: result.usage ?? { totalTokens: 0, inputTokens: 0, outputTokens: 0 },
@@ -1398,6 +1478,8 @@ function createAgent() {
             ...textChunk(messageId, finalText),
           });
         }
+        // R146: spawn path — refresh updatedAt after the turn is archived.
+        try { this.emitSessionInfo(ctx, getSession(session.id)); } catch { /* best-effort */ }
         return { stopReason: "end_turn", usage: { totalTokens: 0, inputTokens: 0, outputTokens: 0 } };
       } catch (err) {
         if (err.message === "cancelled") return { stopReason: "cancelled" };
@@ -1592,11 +1674,12 @@ function runAcp() {
     // P1-3 (R132): pass the handler context too — newSession() needs
     // ctx.client to emit available_commands_update after the response lands.
     .request({ method: methods.agent.session.new, params: permissiveNewSession }, (ctx) => h.newSession(ctx.params, ctx))
-    .request({ method: methods.agent.session.load, params: permissiveLoadSession }, (ctx) => h.loadSession(ctx.params))
+    // R146: load/resume/fork also pass ctx — each emits session_info_update.
+    .request({ method: methods.agent.session.load, params: permissiveLoadSession }, (ctx) => h.loadSession(ctx.params, ctx))
     .request({ method: methods.agent.session.list, params: permissiveAny }, (ctx) => h.listSessions(ctx.params))
     .request({ method: methods.agent.session.delete, params: permissiveAny }, (ctx) => h.deleteSession(ctx.params))
-    .request({ method: methods.agent.session.resume, params: permissiveAny }, (ctx) => h.resumeSession(ctx.params))
-    .request({ method: methods.agent.session.fork, params: permissiveAny }, (ctx) => h.forkSession(ctx.params))
+    .request({ method: methods.agent.session.resume, params: permissiveAny }, (ctx) => h.resumeSession(ctx.params, ctx))
+    .request({ method: methods.agent.session.fork, params: permissiveAny }, (ctx) => h.forkSession(ctx.params, ctx))
     .request({ method: methods.agent.session.close, params: permissiveAny }, (ctx) => h.closeSession(ctx.params))
     .request({ method: methods.agent.session.setMode, params: permissiveSetMode }, (ctx) => h.setSessionMode(ctx.params))
     .request({ method: methods.agent.session.setConfigOption, params: permissiveSetConfigOption }, (ctx) => h.setSessionConfigOption(ctx.params))
