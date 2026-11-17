@@ -267,7 +267,7 @@ dsh-acp doctor --gc    # 立即执行清理
 - **官方桥为实验性（0.3.8）** —— 默认走 *legacy* 路径。启用官方桥需三件套 env 同设
   （见下方「启用官方桥」）；经 launchd 启动需写入 plist `EnvironmentVariables` 或
   `launchctl setenv`，否则重启即回 legacy。
-- **权限路径已修复（0.5.0，未发布）** —— 官方桥 + 内部 router 组合下，触发审批的工具
+- **权限路径已修复（0.4.1）** —— 官方桥 + 内部 router 组合下，触发审批的工具
   （`session/request_permission`）在 0.3.8 及以前会挂起。现由 router 把服务端发起的请求
   转给客户端并回写应答。默认 web profile **不暴露 bash/write 工具**，无论修复前后用户
   实际都很难碰到。

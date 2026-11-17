@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.1 (2026-11-17)
+
+本批聚合 `v0.4.0..HEAD` 的 13 笔工作提交（`0.4.0` 发布物停在 `99f7e30`，不含 G2 根因修复与
+后续 ACP 能力对齐）——**自 0.4.1 起，npm 上的版本才等于本机真机通过的代码**。
+
+### Added
+
+- **R147/R148 — 官方桥审批通路（T5）**：router 以 `{ global: true, prepend: true }`
+  注册 `approval/request`，并把服务端发起的 `session/request_permission` 转发给客户端后
+  回写应答（R147：此前被更早注册的 waterfall 吞掉，工具卡永久停在 `in_progress`）；
+  转发前把审批请求的 `sessionId` 改写为客户端 id，避免客户端因 id 不匹配**整帧丢弃**
+  （R148）。真机 Obsidian UI 验收：弹出 / allow 落盘 / reject 不落盘 fail-closed 三行全中。
+- **R145 — `initialize` 能力声明**：补 `promptCapabilities`（image/audio/embeddedContext=false）
+  与 `mcpCapabilities`（http/sse=false）；`agentInfo.version` 改为读
+  `lib/package-version.mjs` 单一真源（此前硬编码 `"0.2.0"`，与 package.json 漂移）。
+- **R146 — `session_info_update` 发帧**：`session/new` / `load` / `resume` / `fork` 及
+  每轮对话结束后发 `session/update { sessionUpdate: "session_info_update" }`，面板标题与
+  最后活动时间随之刷新（此前从不发送，标题停在 `session/new` 时的占位值）。
+- **P1-2 — 工具卡 Reporter 层**：`lib/tool-call-reporters/`（read / edit / shell / search /
+  web / generic …）产出 tool-specific 的 rich `title` / `content` / `locations`；
+  未知 MCP 工具帧与改动前**逐字节相同**（零回归）。
+- **P1-3 — `available_commands_update` 发帧**：`session/new` 之后广播可用命令，
+  客户端命令面板不再为空。
+- **P2-1 — spawn 路径 reasoning**：spawn 路径产出 `agent_thought_chunk`，思考过程在面板可见。
+- **U3 — 官方桥策略**：启用改为 env 可覆盖，默认「探针 auto」；探针新增 `hostServices`
+  只读诊断（approval / tools / systemPrompt）。
+
+### Fixed
+
+- **G2 根因**：官方桥改为经 `ctx.inject` 挂载，并拆分 provider / model。
+- **P0 取证可见性**：官方桥上游错误整帧 surface 到 SSE 与宿主 stderr（此前静默）。
+- **P2-2**：官方桥 `0.2.2-rc.3` 可用性重探 + 探针不变量守卫。
+- **P2-3**：`usage_update.size` 自动解析。
+
+### Notes
+
+- 协议/API **无不兼容变更**（无 `### Breaking`）。
+- **版本级别：维护者 2026-11-17 裁定取 patch（`0.4.1`）**。内容含新功能（能力声明 /
+  命令广播 / 会话信息帧 / Reporter 层 / spawn 路径 reasoning），按 `分支与版本规范`
+  §2.1「新功能 → minor」本可归 minor；0.x 期由维护者拍板定为 patch，该差异如实登记
+  （依据 §2.2「由用户拍板后再 tag」）。
+- `docs/` 仍只落本地、不上传 GitHub（用户 2026-11-03 裁定）。
+- 新增入库测试：`tool-call-reporters` / `acp-available-commands` / `r145-initialize-capabilities` /
+  `r147-approval-bridge` / `r148-request-sessionid-rewrite` / `official-bridge-policy` /
+  `official-bridge-probe-matrix` / `acp-session-info-update`（`.gitignore` 白名单同步）。
+- 发布门禁读数（2026-11-17）：`test:unit` **498 pass / 0 fail**；`test:officials`
+  **27 pass / 0 fail**（9 skip = optional peer `@deepseek-ai/dsh-acp` 未安装）；
+  `test:protocol` / `test:long` **ALL FEATURE CHECKS PASSED**；`doctor` ✅。
+
 ## 0.4.0 (2026-11-01)
 
 ### Fixed
@@ -28,7 +77,8 @@
 - **测试资产入库（13 个文件）** —— `test/*.test.mjs` 此前被 `.gitignore:42`（`test/*`）忽略，
   全新克隆跑不了 `test:officials` / `test:realllm`。本次把白名单外的 13 个用例入库，
   `.gitignore` 的 `!test/` 放行条数 **22 → 24**
-  （`test/acp-official-router-permission.test.mjs` 属 0.5.0 的权限路径，随 0.5.0 入库）。
+  （`test/acp-official-router-permission.test.mjs` 属权限路径修复，随 0.4.1 入库 ——
+  原记「随 0.5.0」，0.5.0 计划已取消，编号改判为 0.4.1）。
 - **C1 断言滞后修复** —— `test/official-acp-bridge.test.mjs`：断言改为检查 `advisoryServices`，
   与实现一致 ⇒ `tests 9 / pass 9 / fail 0`。
 - **C2 断言滞后修复** —— `test/http-gateway-tool-translation.test.mjs` 与
