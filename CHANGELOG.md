@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.2 (2026-11-17)
+
+本批为 **0.4.2 收口轮**：会话仓库单一来源（W1）+ 跨界面会话实时同步（W2）+ G1 冷启收口，
+并修掉 W1 外溢的测试侧过期断言。
+
+### Added
+
+- **W1 — 会话仓库单一来源（看板卡 `-64`）**：`archive-store.mjs` 写侧默认落 **dsh 原生根**
+  `<DSH_HOME>/sessions/<project-key>/<seg>/session.v4.jsonl.zstd`（新增 zstd 写入器）；
+  `DSH_ACP_ARCHIVE_IN_MAIN=0` 退回私根（保留上游开关）。读侧收敛为「`sessions/` 一次扫描为
+  权威 + 索引仅作缓存 / tombstone」，去掉双 root 拼接。新增
+  `scripts/migrate-archive-to-dsh-native.mjs`（`--dry-run` 默认、`--apply` 才写盘、**只 copy
+  不 move**）。
+- **W2 — 跨界面会话同步（看板卡 `-66`）**：`web/session-panel.mjs` 新增
+  `GET /api-session/events`（SSE），订阅 `ctx.on('session/event')` 并发 `ready` / `session` /
+  `fallback` 三帧（含心跳、有界队列、drain 背压等待）；`lib/client.js` 新增
+  `useSessionEvents()`——`EventSource` 订阅 + 250ms 去抖刷新，收到 `fallback` 即 `close()`
+  并切 5s 轮询，卸载清定时器与连接；接入 4 个会话列表组件。
+
+### Fixed
+
+- **归档断言写死旧布局（W1 外溢回归）**：`acp-feature-test.mjs` 的归档断言硬编码旧三层路径
+  与旧文件名 `session.jsonl`，W1 改布局后误报「未归档」⇒ 改为递归搜索 `session*jsonl*`
+  并对 `.zstd` 先解压再验内容（布局无关）。同处 delete 断言原用旧路径反推归档目录，
+  新布局下必然推不中、`gone=true` 属**恒真假绿** ⇒ 改为取第 6 步实测命中的目录。
+
+### Notes
+
+- 协议/API **无不兼容变更**（无 `### Breaking`）。
+- **版本级别：维护者裁定取 patch（`0.4.2`）**。W1/W2 含新端点（`/api-session/events`）与新
+  脚本，按 `分支与版本规范` §2.1「新功能 → minor」本可归 minor；用户 2026-11-17 明确
+  「非功能性大版本更新，倾向 `0.4.x` 的 tag」⇒ 定为 patch，差异如实登记。
+- 新增入库测试：`test/r134-archive-sync.test.mjs`（zstd round-trip / 读侧单源 / 移动后路径
+  解析）、`test/acp-session-events.test.mjs`（宽容解析 / 订阅不可用响亮降级 / 订阅幂等）；
+  `.gitignore` 白名单同步放行。
+- 发布门禁读数（2026-11-17）：`test:unit` **519 pass / 0 fail**；`test:officials`
+  **27 pass / 0 fail**（9 skip = optional peer `@deepseek-ai/dsh-acp` 未安装）；
+  `test:protocol` / `test:long` **ALL FEATURE CHECKS PASSED**；`doctor` ✅；
+  `node --check` ×8 改动文件 OK。
+- G1c 冷启复验：`launchctl kickstart -k gui/501/com.deepseek.harness.web` 后 probe
+  `mode=long` / `longReady=true` / `official{importable:true,servicesReady:true}`；经
+  `/acp/proxy/session/prompt` 发真实工具指令，回灌
+  `tool_call → tool_call_update(completed) → agent_message_chunk`（帧计数已取）。
+- `docs/` 仍只落本地、不上传 GitHub（用户 2026-11-03 裁定）。
+
 ## 0.4.1 (2026-11-17)
 
 本批聚合 `v0.4.0..HEAD` 的 13 笔工作提交（`0.4.0` 发布物停在 `99f7e30`，不含 G2 根因修复与
