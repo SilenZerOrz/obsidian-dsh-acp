@@ -1,13 +1,13 @@
 # obsidian-dsh-acp
 
-[English](Zyq/工作文件/项目-dsh-acp/README.md) · **简体中文** · [Русский](README.ru.md)
+[English](README.md) · **简体中文** · [Русский](README.ru.md)
 
 版本历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
-[![node](Zyq/工作文件/项目-dsh-acp/package.json)
+[![node](https://img.shields.io/node/v/obsidian-dsh-acp)](package.json)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.1.6--alpha.1-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
 
 > 在 **[Obsidian](https://obsidian.md)** 里直接使用
@@ -48,14 +48,28 @@ dsh  （headless 一次性任务，或长驻的 dsh web gateway）
 - 🩺 **自检与一键修复** —— `dsh-acp doctor` 诊断环境漂移，并能自动修复大部分问题。
 - 🧹 **自动清理** —— 每次 `session/list` 与 Obsidian 自身的会话列表对账清理孤儿
   （保守策略；仍在 Obsidian 里的会话永不删除）。
+- 🗄️ **统一会话仓库** —— 会话归档进 DSH 自己的仓库（`<DSH_HOME>/sessions/…`，zstd，
+  与 dsh 宿主写入的格式一致），dsh web / 桌面端 / Obsidian 读的是同一份历史，
+  不再是三份各存各的。设 `DSH_ACP_ARCHIVE_IN_MAIN=0` 可退回私有根。
+- 🔄 **跨界面实时同步** —— Obsidian 面板与 dsh web 的会话列表通过 SSE
+  （`/api-session/events`）实时刷新；流不可用时回退 5 秒轮询。
 
 ## 截图
 
-在 Obsidian Agent Client 里注册为自定义 agent、运行一次对话、浏览会话历史：
+在 Obsidian Agent Client 里把 **DeepSeek Harness (ACP)** 注册为自定义 agent
+—— 面板对话、agent 配置、会话历史：
+
+![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*面板对话 —— 可折叠的 Thinking 行与回答直接在面板内渲染，与笔记并排。*
 
 ![Agent settings](assets/screenshots/obsidian-agent-client-settings.png)
-![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*Agent 配置 —— 与内置 agent 并列注册为 `DeepSeek Harness (ACP)`。*
+
 ![Session history](assets/screenshots/obsidian-agent-client-session-history.png)
+
+*会话历史 —— 按 vault 列出会话（会话名与路径已打码）。*
 
 ## 环境要求
 
@@ -240,8 +254,8 @@ dsh-acp doctor --gc    # 立即执行清理
 | `DSH_ACP_PERMISSION_EDIT_TOOLS` | 视作编辑类的工具 | `Edit,Write,MultiEdit,NotebookEdit` |
 | `DSH_ACP_RUNTIME_MODE` | `long` / `spawn` 显式覆盖 | *（自动）* |
 | `DSH_ACP_SPAWN_FALLBACK` | long 初始化失败时回退 spawn | `true` |
-| `DSH_ACP_USE_OFFICIAL_BRIDGE` | 尝试官方 dsh bridge | `0` |
-| `DSH_ACP_ARCHIVE_IN_MAIN` | 把 turn 归档放进 `sessions/` | `0` |
+| `DSH_ACP_USE_OFFICIAL_BRIDGE` | 官方桥策略：`auto` / 强制 `on` / 强制 `off` | *(未设 = `auto`)* |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | 归档进 DSH 原生 `sessions/` 根；`0` 退回私有 `dsh-acp-archives/` 根 | `1` *(原生根)* |
 
 </details>
 
@@ -264,9 +278,9 @@ dsh-acp doctor --gc    # 立即执行清理
 
 - **spawn 路径无权限弹窗** —— 该路径下 bash / 写文件等工具不经确认直接执行。需要
   审批时用 `DSH_ACP_PERMISSION_MODE`（仅在 long-runtime 路径生效）。
-- **官方桥为实验性（0.3.8）** —— 默认走 *legacy* 路径。启用官方桥需三件套 env 同设
-  （见下方「启用官方桥」）；经 launchd 启动需写入 plist `EnvironmentVariables` 或
-  `launchctl setenv`，否则重启即回 legacy。
+- **官方桥默认自动选择（0.4.0+）** —— 默认策略是 `auto`：探针
+  `importable && servicesReady` 时走官方桥，否则回退 legacy（**绝不静默降级**，
+  见下方「官方桥策略」）。0.3.8 及更早默认走 legacy，需三件套 env 同设。
 - **权限路径已修复（0.4.1）** —— 官方桥 + 内部 router 组合下，触发审批的工具
   （`session/request_permission`）在 0.3.8 及以前会挂起。现由 router 把服务端发起的请求
   转给客户端并回写应答。默认 web profile **不暴露 bash/write 工具**，无论修复前后用户
@@ -284,10 +298,10 @@ dsh-acp doctor --gc    # 立即执行清理
 若报 `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`：
 
 1. 从 `~/.dsh/profiles/<profile>/cordis.patch.yml` 找 provider 的 `apiKeyEnv` 字段
-   （如 `JLTOKEN_API_KEY`；**注意**可能与 `.credentials.yaml` 里的 ref 名不同）。
-2. 写入 `~/.dsh/.env`：
+   （**注意**可能与 `.credentials.yaml` 里的 ref 名不同）。
+2. 用刚找到的那个名字写入 `~/.dsh/.env`：
    ```
-   JLTOKEN_API_KEY=<你的密钥>
+   <APIKEYENV_NAME>=<你的密钥>
    ```
 3. Windows 收紧权限：
    ```powershell
@@ -310,27 +324,39 @@ DSH_ACP_CONTEXT_WINDOW=200000    # 或你模型的实际上限
 
 写入 `~/.dsh/.env`（与 API key 一起）或 dsh web 进程环境。仅在上游模型不报告时作为回退。
 
-## 启用官方桥（实验性）
+## 官方桥策略
 
-0.3.8 默认 legacy。若需启用官方桥：
+适配器有两条路径：**官方 dsh bridge**（进程内 host 服务 —— 工具 / 审批 / system prompt）
+与 **legacy long 路径**。走哪条由 `DSH_ACP_USE_OFFICIAL_BRIDGE` 决定：
+
+| 取值 | 效果 |
+|---|---|
+| *(未设)* | **`auto`（默认）** —— 探针报 `importable && servicesReady` 就走官方桥，否则 legacy |
+| `1` / `true` / `yes` / `on` | 强制**开启** —— 不等探针直接挂载 |
+| `0` / `false` / `no` / `off` | 强制**关闭** —— 恒走 legacy（回滚开关） |
+
+`auto` **绝不静默降级**：适配器会打一行可 grep 的日志，probe 同时给出策略与原因。
 
 ```bash
-# 方式 1：临时 env（仅本次 dsh web 进程）
-DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
-DSH_ACP_OFFICIAL_PROVIDER=<provider> \
-DSH_ACP_OFFICIAL_MODEL=<model> \
-dsh --profile web --port 3080 --no-open
+curl -s http://127.0.0.1:3080/acp/proxy/probe
+#  "officialPolicy":{"mode":"auto","active":true,
+#    "reason":"auto：探针可用（importable && servicesReady）"}
+#  "official":{"importable":true,"servicesReady":true,"hostServices":{...}}
 
-# 方式 2：launchd 常驻（推荐，永久生效）
-launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
-launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
-launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
-launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
-# 回滚：launchctl unsetenv ... + kickstart
+grep 'official bridge policy' /tmp/dsh-web.log
+#  [dsh-acp] official bridge policy=auto active=true — auto：探针可用（importable && servicesReady）
 ```
 
-验证：`curl -s http://127.0.0.1:3080/acp/proxy/probe` 应返回
-`official.envSwitchOn:true` + `servicesReady:true`。
+要钉死（例如调试时强制 legacy），用 launchd 设置以便重启后仍生效：
+
+```bash
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 0    # 或 1 强制走官方桥
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# 回滚：launchctl unsetenv DSH_ACP_USE_OFFICIAL_BRIDGE && launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+```
+
+`DSH_ACP_OFFICIAL_PROVIDER` / `DSH_ACP_OFFICIAL_MODEL` 可选，用来覆盖 bridge 使用的
+provider / model。
 
 ## 开发
 

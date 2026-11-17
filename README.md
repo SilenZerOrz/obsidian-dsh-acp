@@ -7,7 +7,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for version history.
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
-[![node](Zyq/工作文件/项目-dsh-acp/package.json)
+[![node](https://img.shields.io/node/v/obsidian-dsh-acp)](package.json)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.1.6--alpha.1-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
 
 > Run **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)**
@@ -53,15 +53,32 @@ output back to the client as `agent_message_chunk` updates and finishes with an
   drift and can repair most issues automatically.
 - 🧹 **Automatic cleanup** — orphaned sessions are reconciled against Obsidian's
   own session list (conservatively; live sessions are never removed).
+- 🗄️ **One shared session store** — sessions are archived into DSH's own store
+  (`<DSH_HOME>/sessions/…`, zstd, same format the dsh host writes), so dsh web,
+  the desktop app and Obsidian read the same history instead of three separate
+  archives. Set `DSH_ACP_ARCHIVE_IN_MAIN=0` to revert to the private root.
+- 🔄 **Cross-surface live sync** — the session list refreshes live across the
+  Obsidian panel and dsh web over SSE (`/api-session/events`), falling back to
+  5 s polling when the stream is unavailable.
 
 ## Screenshots
 
-Registered as a custom agent, running a conversation, and browsing session
-history — all inside Obsidian Agent Client:
+**DeepSeek Harness (ACP)** registered as a custom agent in Obsidian Agent
+Client — running a conversation, agent configuration, and session history:
+
+![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*Panel conversation — the collapsible thinking row and the answer render
+inline, next to your notes.*
 
 ![Agent settings](assets/screenshots/obsidian-agent-client-settings.png)
-![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*Agent configuration — registered as `DeepSeek Harness (ACP)` next to the
+built-in agents.*
+
 ![Session history](assets/screenshots/obsidian-agent-client-session-history.png)
+
+*Session history — sessions grouped per vault (names and paths redacted).*
 
 ## Requirements
 
@@ -264,8 +281,8 @@ CLI on your system (`DSH_ACP_SPAWN_PROFILE` overrides the profile; it defaults t
 | `DSH_ACP_PERMISSION_EDIT_TOOLS` | tools treated as edit-style | `Edit,Write,MultiEdit,NotebookEdit` |
 | `DSH_ACP_RUNTIME_MODE` | `long` / `spawn` explicit override | *(auto)* |
 | `DSH_ACP_SPAWN_FALLBACK` | fall back to spawn if long init fails | `true` |
-| `DSH_ACP_USE_OFFICIAL_BRIDGE` | try the official dsh bridge | `0` |
-| `DSH_ACP_ARCHIVE_IN_MAIN` | put turn archives under `sessions/` | `0` |
+| `DSH_ACP_USE_OFFICIAL_BRIDGE` | official bridge policy: `auto` / force `on` / force `off` | *(unset = `auto`)* |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | archive under DSH's native `sessions/` root; `0` reverts to the private `dsh-acp-archives/` root | `1` *(native root)* |
 
 </details>
 
@@ -289,11 +306,11 @@ copy-pasteable fix commands.
 - **No permission prompts on the spawn path** — bash / file-write tools run
   without confirmation dialogs there. Use `DSH_ACP_PERMISSION_MODE` (effective on
   the long-runtime path) if you need approvals.
-- **Official dsh bridge is experimental (0.3.8)** — the default path is *legacy*.
-  Enabling the official bridge requires all three env vars set together (see
-  "Enabling the official bridge" below); when launched via launchd, they must go
-  into the plist `EnvironmentVariables` or `launchctl setenv`, otherwise a restart
-  reverts to legacy.
+- **Official dsh bridge is selected automatically (0.4.0+)** — the default policy
+  is `auto`: use the bridge when it is importable *and* its host services are
+  ready, otherwise fall back to legacy (never silently — see "Official bridge
+  policy" below). 0.3.8 and earlier defaulted to legacy and needed all three env
+  vars set together.
 - **Permission path fixed (0.4.1)** — under the official bridge +
   internal router, a tool that triggered approval (`session/request_permission`)
   used to hang (0.3.8 and earlier). The router now forwards the server-initiated
@@ -309,11 +326,11 @@ fall back to: `process.env` → `<invocation cwd>/.env` → `$DSH_HOME/.env`.
 If you see `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`:
 
 1. Find the env name from `~/.dsh/profiles/<profile>/cordis.patch.yml` —
-   the provider's `apiKeyEnv` field (e.g. `JLTOKEN_API_KEY`, note: this may
-   differ from the ref name in `.credentials.yaml`).
-2. Write it into `~/.dsh/.env`:
+   the provider's `apiKeyEnv` field (note: this may differ from the ref name in
+   `.credentials.yaml`).
+2. Write it into `~/.dsh/.env`, using the exact name you just found:
    ```
-   JLTOKEN_API_KEY=<your-key>
+   <APIKEYENV_NAME>=<your-key>
    ```
 3. On Windows, restrict permissions:
    ```powershell
@@ -338,27 +355,42 @@ DSH_ACP_CONTEXT_WINDOW=200000    # or your model's actual limit
 Add it to `~/.dsh/.env` (alongside your API key) or the dsh web process
 environment. It is used as a fallback when the upstream model reports none.
 
-## Enabling the official bridge (experimental)
+## Official bridge policy
 
-0.3.8 defaults to legacy. To enable the official bridge:
+The adapter runs on one of two paths: the **official dsh bridge** (in-process
+host services — tools, approvals, system prompt) or the **legacy long path**.
+Which one is used follows `DSH_ACP_USE_OFFICIAL_BRIDGE`:
+
+| Value | Effect |
+|---|---|
+| *(unset)* | **`auto` (default)** — bridge when the probe reports `importable && servicesReady`, otherwise legacy |
+| `1` / `true` / `yes` / `on` | force **on** — mounted without waiting for the probe |
+| `0` / `false` / `no` / `off` | force **off** — always legacy (the rollback switch) |
+
+`auto` never degrades silently: the adapter logs one greppable line, and the probe
+reports both the policy and its reason.
 
 ```bash
-# Option 1: temporary env (this dsh web process only)
-DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
-DSH_ACP_OFFICIAL_PROVIDER=<provider> \
-DSH_ACP_OFFICIAL_MODEL=<model> \
-dsh --profile web --port 3080 --no-open
+curl -s http://127.0.0.1:3080/acp/proxy/probe
+#  "officialPolicy":{"mode":"auto","active":true,
+#    "reason":"auto：探针可用（importable && servicesReady）"}
+#  "official":{"importable":true,"servicesReady":true,"hostServices":{...}}
 
-# Option 2: launchd (persistent, recommended)
-launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
-launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
-launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
-launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
-# rollback: launchctl unsetenv ... + kickstart
+grep 'official bridge policy' /tmp/dsh-web.log
+#  [dsh-acp] official bridge policy=auto active=true — auto：探针可用（importable && servicesReady）
 ```
 
-Verify: `curl -s http://127.0.0.1:3080/acp/proxy/probe` should return
-`official.envSwitchOn:true` + `servicesReady:true`.
+To pin it (for example, force legacy while debugging), set it via launchd so it
+survives restarts:
+
+```bash
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 0    # or 1 to force the bridge
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# rollback: launchctl unsetenv DSH_ACP_USE_OFFICIAL_BRIDGE && launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+```
+
+`DSH_ACP_OFFICIAL_PROVIDER` / `DSH_ACP_OFFICIAL_MODEL` optionally override which
+provider / model the bridge runs on.
 
 ## Development
 

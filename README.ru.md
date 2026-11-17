@@ -1,13 +1,13 @@
 # obsidian-dsh-acp
 
-[English](Zyq/工作文件/项目-dsh-acp/README.md) · [简体中文](README.zh-CN.md) · **Русский**
+[English](README.md) · [简体中文](README.zh-CN.md) · **Русский**
 
 История версий — [CHANGELOG.md](./CHANGELOG.md).
 
 [![npm version](https://img.shields.io/npm/v/obsidian-dsh-acp?color=blue)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![npm downloads](https://img.shields.io/npm/dm/obsidian-dsh-acp)](https://www.npmjs.com/package/obsidian-dsh-acp)
 [![license](https://img.shields.io/npm/l/obsidian-dsh-acp)](LICENSE)
-[![node](Zyq/工作文件/项目-dsh-acp/package.json)
+[![node](https://img.shields.io/node/v/obsidian-dsh-acp)](package.json)
 [![dsh](https://img.shields.io/badge/dsh-%E2%89%A50.1.6--alpha.1-blueviolet)](https://github.com/deepseek-ai/deepseek-harness)
 
 > Запускайте **[DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness)**
@@ -53,15 +53,32 @@ DSH обратно в клиент как обновления `agent_message_ch
   окружения и устраняет большинство проблем автоматически.
 - 🧹 **Автоочистка** — «осиротевшие» сессии выверяются по списку сессий Obsidian
   (консервативно; живые сессии никогда не удаляются).
+- 🗄️ **Единое хранилище сессий** — сессии архивируются в собственное хранилище DSH
+  (`<DSH_HOME>/sessions/…`, zstd, тот же формат, что пишет хост dsh), поэтому dsh web,
+  десктопное приложение и Obsidian читают одну и ту же историю, а не три разных архива.
+  `DSH_ACP_ARCHIVE_IN_MAIN=0` возвращает приватный корень.
+- 🔄 **Живая синхронизация между интерфейсами** — список сессий обновляется в реальном
+  времени в панели Obsidian и в dsh web по SSE (`/api-session/events`), с откатом на
+  опрос раз в 5 с, если поток недоступен.
 
 ## Скриншоты
 
-Зарегистрирован как пользовательский агент, диалог и история сессий — всё внутри
-Obsidian Agent Client:
+**DeepSeek Harness (ACP)** зарегистрирован как пользовательский агент в Obsidian
+Agent Client — диалог в панели, настройка агента и история сессий:
+
+![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*Диалог в панели — сворачиваемая строка «Thinking» и ответ отображаются прямо
+в панели, рядом с заметками.*
 
 ![Agent settings](assets/screenshots/obsidian-agent-client-settings.png)
-![Chat panel](assets/screenshots/obsidian-agent-client-chat.png)
+
+*Настройка агента — зарегистрирован как `DeepSeek Harness (ACP)` вместе со
+встроенными агентами.*
+
 ![Session history](assets/screenshots/obsidian-agent-client-session-history.png)
+
+*История сессий — сессии сгруппированы по хранилищу (имена и пути скрыты).*
 
 ## Требования
 
@@ -261,8 +278,8 @@ dsh-acp doctor --gc    # запустить очистку сейчас
 | `DSH_ACP_PERMISSION_EDIT_TOOLS` | инструменты класса «edit» | `Edit,Write,MultiEdit,NotebookEdit` |
 | `DSH_ACP_RUNTIME_MODE` | явное переопределение `long` / `spawn` | *(авто)* |
 | `DSH_ACP_SPAWN_FALLBACK` | откат к spawn при сбое long | `true` |
-| `DSH_ACP_USE_OFFICIAL_BRIDGE` | попробовать официальный bridge dsh | `0` |
-| `DSH_ACP_ARCHIVE_IN_MAIN` | архивы ходов в `sessions/` | `0` |
+| `DSH_ACP_USE_OFFICIAL_BRIDGE` | политика bridge: `auto` / принудительно `on` / `off` | *(не задано = `auto`)* |
+| `DSH_ACP_ARCHIVE_IN_MAIN` | архивы в нативном корне DSH `sessions/`; `0` возвращает приватный корень `dsh-acp-archives/` | `1` *(нативный корень)* |
 
 </details>
 
@@ -287,11 +304,10 @@ headless с готовыми командами починки.
 - **Нет запросов разрешений на пути spawn** — там инструменты bash / записи файлов
   выполняются без диалогов подтверждения. Для подтверждений используйте
   `DSH_ACP_PERMISSION_MODE` (действует на пути long-runtime).
-- **Официальный bridge dsh — экспериментальный (0.3.8)** — по умолчанию используется
-  путь *legacy*. Для включения официального bridge нужны все три переменные окружения
-  одновременно (см. «Включение официального bridge» ниже); при запуске через launchd
-  их нужно поместить в `EnvironmentVariables` plist или `launchctl setenv`, иначе
-  перезапуск вернёт legacy.
+- **Официальный bridge dsh выбирается автоматически (0.4.0+)** — политика по умолчанию
+  `auto`: bridge используется, когда он импортируем *и* его host-сервисы готовы, иначе
+  происходит откат на legacy (никогда молча — см. «Политика официального bridge» ниже).
+  В 0.3.8 и ранее по умолчанию использовался legacy и требовались все три переменные.
 - **Путь разрешений исправлен (0.4.1)** — при официальном
   bridge + внутреннем router инструмент, запрашивающий подтверждение
   (`session/request_permission`), зависал в 0.3.8 и ранее. Теперь router передаёт
@@ -312,11 +328,11 @@ headless с готовыми командами починки.
 Если видите `MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route "<name>"`:
 
 1. Найдите имя переменной в `~/.dsh/profiles/<profile>/cordis.patch.yml` — поле
-   `apiKeyEnv` провайдера (например `JLTOKEN_API_KEY`; **учтите**: оно может
-   отличаться от ref-имени в `.credentials.yaml`).
-2. Запишите в `~/.dsh/.env`:
+   `apiKeyEnv` провайдера (**учтите**: оно может отличаться от ref-имени в
+   `.credentials.yaml`).
+2. Запишите в `~/.dsh/.env`, используя найденное имя:
    ```
-   JLTOKEN_API_KEY=<ваш-ключ>
+   <APIKEYENV_NAME>=<ваш-ключ>
    ```
 3. В Windows ограничьте права:
    ```powershell
@@ -341,27 +357,42 @@ DSH_ACP_CONTEXT_WINDOW=200000    # или фактический предел в
 Добавьте её в `~/.dsh/.env` (вместе с API key) или в окружение процесса dsh web.
 Используется как фолбэк, когда модель не сообщает значение.
 
-## Включение официального bridge (экспериментальный)
+## Политика официального bridge
 
-0.3.8 по умолчанию использует legacy. Чтобы включить официальный bridge:
+Адаптер работает по одному из двух путей: **официальный bridge dsh** (host-сервисы в
+процессе — инструменты, подтверждения, system prompt) или **legacy long**. Выбор
+определяет `DSH_ACP_USE_OFFICIAL_BRIDGE`:
+
+| Значение | Эффект |
+|---|---|
+| *(не задано)* | **`auto` (по умолчанию)** — bridge, если проба сообщает `importable && servicesReady`, иначе legacy |
+| `1` / `true` / `yes` / `on` | принудительно **включить** — монтируется, не дожидаясь пробы |
+| `0` / `false` / `no` / `off` | принудительно **выключить** — всегда legacy (переключатель отката) |
+
+`auto` **никогда не деградирует молча**: адаптер пишет одну grep-able строку, а проба
+сообщает и политику, и её причину.
 
 ```bash
-# Вариант 1: временное окружение (только этот процесс dsh web)
-DSH_ACP_USE_OFFICIAL_BRIDGE=1 \
-DSH_ACP_OFFICIAL_PROVIDER=<provider> \
-DSH_ACP_OFFICIAL_MODEL=<model> \
-dsh --profile web --port 3080 --no-open
+curl -s http://127.0.0.1:3080/acp/proxy/probe
+#  "officialPolicy":{"mode":"auto","active":true,
+#    "reason":"auto：探针可用（importable && servicesReady）"}
+#  "official":{"importable":true,"servicesReady":true,"hostServices":{...}}
 
-# Вариант 2: launchd (постоянно, рекомендуется)
-launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 1
-launchctl setenv DSH_ACP_OFFICIAL_PROVIDER <provider>
-launchctl setenv DSH_ACP_OFFICIAL_MODEL <model>
-launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
-# откат: launchctl unsetenv ... + kickstart
+grep 'official bridge policy' /tmp/dsh-web.log
+#  [dsh-acp] official bridge policy=auto active=true — auto：探针可用（importable && servicesReady）
 ```
 
-Проверка: `curl -s http://127.0.0.1:3080/acp/proxy/probe` должно вернуть
-`official.envSwitchOn:true` + `servicesReady:true`.
+Чтобы зафиксировать выбор (например, принудительно legacy при отладке), задайте его
+через launchd, чтобы он пережил перезапуск:
+
+```bash
+launchctl setenv DSH_ACP_USE_OFFICIAL_BRIDGE 0    # или 1, чтобы включить bridge
+launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+# откат: launchctl unsetenv DSH_ACP_USE_OFFICIAL_BRIDGE && launchctl kickstart -k gui/$(id -u)/com.deepseek.harness.web
+```
+
+`DSH_ACP_OFFICIAL_PROVIDER` / `DSH_ACP_OFFICIAL_MODEL` — необязательные переопределения
+провайдера / модели, на которых работает bridge.
 
 ## Разработка
 
