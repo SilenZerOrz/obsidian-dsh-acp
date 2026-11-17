@@ -755,7 +755,24 @@ function sessionConfigOptions(session) {
   ];
 }
 
-/** Merge disk-scanned archives with the durable index for session/list. */
+/**
+ * `session/list` 的**单一来源**。
+ *
+ * R134（0.4.2 W1 交付物 2 / 验收②）：旧实现是「持久索引 ∪ 磁盘扫描」的
+ * **双 root 拼接** —— 索引来自 `~/.dsh-acp/dsh-acp-sessions.json`（第二权威），
+ * 磁盘扫描只认 `<DSH_HOME>/sessions/`，而写侧默认写在
+ * `<DSH_HOME>/dsh-acp-archives/`。两边口径不一致 ⇒ 「磁盘上到底有几个会话」
+ * 说不清，且本仓自己写的会话读侧看不见。
+ *
+ * 现在：
+ *   - **磁盘是唯一权威**。`scanArchives(cwd)` 与写侧共用同一套路径解析
+ *     （`archiveWorkspaceDir()`），扫出来的就是写侧写进去的。
+ *   - **索引降级为缓存/tombstone**：只用于补元数据（标题 / summary /
+ *     parentSessionId / createdAt）与「已删除 ⇒ 不复活」的判定，
+ *     不再作为独立的会话来源。
+ *
+ * 去重口径：同一 id 只出现一次，索引记录优先（它带更多元数据）。
+ */
 function listSessionRecords(cwd) {
   const indexRecords = allSessions().map((s) => ({
     id: s.id,
@@ -766,10 +783,19 @@ function listSessionRecords(cwd) {
     summaryAt: s.summaryAt ?? undefined,
     createdAt: s.createdAt ?? undefined, // M1.1: ISO timestamp for updatedAt derivation
   }));
-  const scanned = scanArchives(cwd).map((s) => ({ id: s.id, title: s.title, cwd: s.cwd, parentSessionId: null }));
-  // De-dupe by id, index records first.
-  const seen = new Set(indexRecords.map((s) => s.id));
-  return indexRecords.concat(scanned.filter((s) => !seen.has(s.id)));
+  const byId = new Map(indexRecords.map((s) => [s.id, s]));
+  // 磁盘扫描（唯一权威源）。scanArchives() 已按「索引里已有的 id」去重，
+  // 这里再按 id 兜一次底（索引可能被并发进程更新，两次读到的集合不同）。
+  const scanned = scanArchives(cwd).map((s) => ({
+    id: s.id,
+    title: s.title,
+    cwd: s.cwd,
+    parentSessionId: null,
+  }));
+  for (const rec of scanned) {
+    if (!byId.has(rec.id)) byId.set(rec.id, rec);
+  }
+  return [...byId.values()];
 }
 
 /**

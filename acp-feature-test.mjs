@@ -20,6 +20,7 @@
 import { client, methods, ndJsonStream } from "@agentclientprotocol/sdk";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { zstdDecompressSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -382,37 +383,56 @@ await app.connectWith(stream, async (ctx) => {
   }
 
   // archive check
+  //
+  // W1（卡 `-64`，R134 会话仓库统一）后，写侧**默认落 dsh 原生根**：
+  //   <DSH_HOME>/sessions/<project-key>/<session-id>/session.v4.jsonl.zstd
+  // 即「多一层项目键 + zstd 物理编码」，不再是旧布局
+  //   <root>/<encodeWorkspace(cwd)>/<session-id>/session.jsonl
+  // ⇒ 本检查改为**在两处根下递归找** `session*jsonl*`（`.zstd` 先解压再断言），
+  //   不再假设固定三层路径与固定文件名（否则会把布局演进误报成「未归档」）。
+  // 兼容：`DSH_ACP_ARCHIVE_IN_MAIN=0` 的私根回退模式（未压缩 `session.jsonl`）
+  //   仍在覆盖范围内（同一个 walk 会命中）。
   let archived = false;
+  let archivalDir = null;
+  let archivalLog = null;
   try {
-    for (const rootName of ["dsh-acp-archives", "sessions"]) {
-      const rootPath = join(dshHome, rootName);
-      if (!existsSync(rootPath)) continue;
-      for (const enc of readdirSync(rootPath)) {
-        const sub = join(rootPath, enc);
-        for (const sid of existsSync(sub) ? readdirSync(sub) : []) {
-          const log = join(sub, sid, "session.jsonl");
-          if (existsSync(log) && readFileSync(log, "utf8").includes("hello from test")) archived = true;
+    const readLogText = (file) => {
+      const buf = readFileSync(file);
+      return /\.zstd$/.test(file) ? zstdDecompressSync(buf).toString("utf8") : buf.toString("utf8");
+    };
+    const walk = (dir, depth) => {
+      if (archived || depth > 4) return;
+      let entries = [];
+      try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) { walk(full, depth + 1); if (archived) return; }
+        else if (/^session.*\.jsonl/.test(e.name)) {
+          try {
+            if (readLogText(full).includes("hello from test")) {
+              archived = true;
+              archivalDir = dir;
+              archivalLog = full;
+              return;
+            }
+          } catch { /* 解压/读失败视为未命中 */ }
         }
       }
+    };
+    for (const rootName of ["dsh-acp-archives", "sessions"]) {
+      const rootPath = join(dshHome, rootName);
+      if (existsSync(rootPath)) walk(rootPath, 1);
     }
   } catch {}
-  console.log("== archive ==", archived ? "user turn written to DSH_HOME/sessions" : "NOT FOUND");
+  console.log("== archive ==", archived ? "user turn written to DSH_HOME/sessions" : "NOT FOUND",
+    archivalLog ? "(" + archivalLog + ")" : "");
   check("user message archived under DSH_HOME/sessions", archived);
 
   // 7. delete: remove on-disk archive dirs AND stop session/list from re-surfacing it
   // (REQ-01 regression: before the fix, deleteSession dropped only the index record,
   //  so scanArchives() re-surfaced the "deleted" session on the next list.)
-  let archivalDir = null;
-  try {
-    const indexPath = join(storeDir, "dsh-acp-sessions.json");
-    const json = JSON.parse(readFileSync(indexPath, "utf8"));
-    const rec = json.sessions[s1];
-    const enc = encodeWorkspaceForTest(workdir);
-    for (const rootName of ["dsh-acp-archives", "sessions"]) {
-      const cand = join(dshHome, rootName, enc, rec.archive);
-      if (existsSync(cand)) archivalDir = cand;
-    }
-  } catch {}
+  // 归档目录直接取第 6 步**实测命中的那个目录**（布局无关），不再用固定三层拼接
+  // 反推 —— 旧写法在原生根布局下必然推不中，会让本断言静默退化为「恒真」。
   const hadArchiveDir = !!archivalDir;
 
   const del = await ctx.request(methods.agent.session.delete, { sessionId: s1 });

@@ -130,17 +130,17 @@ test("archiveSessionId: always returns a fresh 'session-<uuid>'", () => {
   assert.notEqual(a, b, "two calls must produce different ids");
 });
 
-test("archiveDir: default root is <DSH_HOME>/dsh-acp-archives/<enc>/<id>", () => {
+test("archiveDir: default root is <DSH_HOME>/sessions/<project-key>/<seg>", () => {
   delete process.env.DSH_ACP_ARCHIVE_IN_MAIN;
   const dir = archiveStore.archiveDir("/tmp/proj", "session-abc");
-  assert.equal(dir, join(dshHomeDir, "dsh-acp-archives", "--tmp-proj--", "session-abc"));
+  assert.equal(dir, join(dshHomeDir, "sessions", "--tmp-proj--", "session-abc"));
 });
 
-test("archiveDir: DSH_ACP_ARCHIVE_IN_MAIN=1 switches the root to <DSH_HOME>/sessions/", () => {
-  process.env.DSH_ACP_ARCHIVE_IN_MAIN = "1";
+test("archiveDir: DSH_ACP_ARCHIVE_IN_MAIN=0 falls back to the private root", () => {
+  process.env.DSH_ACP_ARCHIVE_IN_MAIN = "0";
   try {
     const dir = archiveStore.archiveDir("/tmp/proj", "session-abc");
-    assert.equal(dir, join(dshHomeDir, "sessions", "--tmp-proj--", "session-abc"));
+    assert.equal(dir, join(dshHomeDir, "dsh-acp-archives", "--tmp-proj--", "session-abc"));
   } finally {
     delete process.env.DSH_ACP_ARCHIVE_IN_MAIN;
   }
@@ -151,10 +151,10 @@ test("encodeWorkspace: leading / dropped, non-alnum → '-', wrapped in --…--"
   assert.equal(archiveStore.encodeWorkspace("/tmp/a_b.c"), "--tmp-a-b-c--");
 });
 
-test("archiveLogPath: <archiveDir>/session.jsonl", () => {
+test("archiveLogPath: <archiveDir>/session.v4.jsonl.zstd on the native root", () => {
   delete process.env.DSH_ACP_ARCHIVE_IN_MAIN;
   const dir = archiveStore.archiveDir("/tmp/p", "session-x");
-  assert.equal(archiveStore.archiveLogPath("/tmp/p", "session-x"), join(dir, "session.jsonl"));
+  assert.equal(archiveStore.archiveLogPath("/tmp/p", "session-x"), join(dir, "session.v4.jsonl.zstd"));
 });
 
 test("appendArchiveEvent: writes a session header + seq'd events, readable back as JSONL", () => {
@@ -163,16 +163,18 @@ test("appendArchiveEvent: writes a session header + seq'd events, readable back 
   archiveStore.appendArchiveEvent(rec, "assistant", "world");
 
   assert.ok(existsSync(logPath), `archive log should exist at ${logPath}`);
-  const lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+  // 原生根写出的是 zstd，读回须先解压（readArchivePlaintext 自动识别）。
+  const lines = archiveStore.readArchivePlaintext(logPath).split("\n").filter(Boolean);
   assert.ok(lines.length >= 2, `expected >=2 lines, got ${lines.length}`);
   const objs = lines.map((l) => JSON.parse(l));
 
   // Header line must be a DSH 'session' event and only appear ONCE.
   const headers = objs.filter((o) => o.type === "session");
   assert.equal(headers.length, 1, `expected exactly 1 session header, got ${headers.length}`);
-  assert.equal(headers[0].version, 0);
+  assert.equal(headers[0].version, 4);
   assert.equal(headers[0].cwd, "/tmp/arch-proj");
   assert.equal(headers[0].agentPreset, "standard");
+  assert.equal(headers[0].isSeeded, false, "原生 v4 头用 isSeeded 取代已退役的 seedLength");
 
   // Every non-header line carries a numeric seq, strictly increasing from 0.
   const events = objs.filter((o) => o.type !== "session");
@@ -231,9 +233,9 @@ test("moveSession: updates cwd and relocates the archive dir to the new workspac
   assert.ok(!existsSync(oldDir), `OLD archive dir should be gone after move: ${oldDir}`);
 
   // The archived content travelled with the directory.
-  const log = join(newDir, "session.jsonl");
+  const log = join(newDir, "session.v4.jsonl.zstd");
   assert.ok(existsSync(log), `archive log should be at the new location: ${log}`);
-  assert.ok(readFileSync(log, "utf8").includes("before move"), "archived text should survive the move");
+  assert.ok(archiveStore.readArchivePlaintext(log).includes("before move"), "archived text should survive the move");
 });
 
 test("moveSession: same-cwd is a no-op that returns the record unchanged", () => {

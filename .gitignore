@@ -92,7 +92,13 @@ test/*
 !test/context-window.test.mjs
 !test/official-bridge-probe-matrix.test.mjs
 !test/headless-reasoning.test.mjs
-scripts/
+# 卡 -64（R134 会话仓库统一）：第 W1-d 条单测进 test:unit，故须入库。
+!test/r134-archive-sync.test.mjs
+# 卡 -66（W2-a 跨界面会话同步）：SSE 订阅契约单测进 test:unit，故须入库。
+!test/acp-session-events.test.mjs
+# scripts/ 默认忽略；仅放行被 test:unit 引用的迁移工具（发布SOP §A11 例外登记）。
+scripts/*
+!scripts/migrate-archive-to-dsh-native.mjs
 # acp-feature-test.mjs 已入库（2026-10-30）：它是 test:protocol / test:long 的唯一入口，
 # 且承载第 1 项 #1(SPEC) / #3(弱断言) 修复。不入库 = 新克隆者两套测试直接失败。
 test-validate-cwd.mjs

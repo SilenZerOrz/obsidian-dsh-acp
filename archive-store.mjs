@@ -9,19 +9,44 @@
 //
 //  2. A best-effort writer that mirrors each completed ACP turn into a DSH
 //     official archive at
-//         <DSH_HOME>/sessions/<encoded-cwd>/session-<id>/session.jsonl
-//     using DeepSeek Harness' native event-log shape so the DSH web main
-//     process can read it back ("write ACP sessions back into DSH web's own
-//     conversation archive").
+//         <DSH_HOME>/sessions/<project-key>/<session-id>/session.v4.jsonl.zstd
+//     using DeepSeek Harness' native event-log shape (zstd-compressed, native
+//     v4 header) so the DSH web main process can read it back ("write ACP
+//     sessions back into DSH web's own conversation archive").
+//
+// R134 / P3-ArchiveSync（0.4.2 W1）：归档目录统一到 dsh 原生 `~/.dsh/sessions/`。
+// 关键点（全部经真机实测，见 docs/实施计划/0.4.2-会话仓库统一与双界面同步-实施计划.md）：
+//   - 原生路径方案**不是**本仓旧的 `encodeWorkspace()`（`--a-b-c--`，有损替换），
+//     而是 dsh-session-persistence-jsonl 的 `projectKey()`（`~XXXX` 转义 +
+//     分隔符折叠）与 `encodeSegment()`。两套方案落在**不同命名空间**，混用
+//     会让同一个 cwd 产生两个目录 ⇒ 读侧扫不到、写侧覆盖不到。
+//   - 原生物理编码是 **zstd**（`session.v4.jsonl.zstd`），且原生 v4 头字段是
+//     `{type,version,id,createdAt,isSeeded,delegationDepth}` + 可选
+//     `{cwd,parentSession,origin,agentPreset}`。旧头的 `seedLength` 已退役
+//     （原生读侧 `assertNoRetiredHeaderFields` 会拒），必须换掉。
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync, appendFileSync, renameSync, statSync, rmSync } from "node:fs";
 import { join, sep } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { zstdCompressSync, zstdDecompressSync, constants as zlibConstants } from "node:zlib";
 
 // ---- Paths / encoding ----------------------------------------------------
 
 const STORE_FILE_NAME = "dsh-acp-sessions.json";
+
+/**
+ * DSH 原生 Session 格式版本（dsh-session 的 SESSION_FORMAT_VERSION）。
+ * 原生物理文件名 = `session.v<N>.jsonl` + 压缩后缀 `.zstd`。
+ * 跟随宿主版本推进；本仓只写当前版本，宿主读侧负责向下迁移。
+ */
+export const NATIVE_SESSION_FORMAT_VERSION = 4;
+
+/** 压缩后的原生事件日志文件名（dsh-session-format 的 generationLogFilename）。 */
+export const NATIVE_SESSION_LOG_NAME = `session.v${NATIVE_SESSION_FORMAT_VERSION}.jsonl.zstd`;
+
+/** 旧的未压缩日志文件名（保留：私有根回退模式与旧归档读取）。 */
+export const LEGACY_SESSION_LOG_NAME = "session.jsonl";
 
 /** Root for the durable ACP session index. Overridable for tests. */
 export function storeRoot() {
@@ -35,8 +60,13 @@ export function dshHome() {
 
 /**
  * Encode an absolute cwd into the DSH sessions directory name.
- * Mirror of DSH's scheme: drop the leading "/", replace every non
- * [A-Za-z0-9] char with "-", then wrap in "--…--".
+ *
+ * ⚠️ 历史实现（`--a-b-c--`，非字母数字一律替换为 `-`）是**有损**的：
+ * `/a/b` 与 `/a-b` 会塌成同一个键。dsh 原生（`projectKey()`）改用
+ * `~XXXX` 转义来保住可逆性。本函数**保留旧语义**（旧私有根的既有目录名
+ * 依赖它，且 gc.mjs / 迁移工具按它寻址），新增的原生路径走
+ * {@link nativeProjectKey}。
+ *
  *   /home/user/projects/app -> --home-user-projects-app--
  */
 export function encodeWorkspace(cwd) {
@@ -44,22 +74,107 @@ export function encodeWorkspace(cwd) {
   return `--${cleaned}--`;
 }
 
-/** Absolute path of the archive directory for one ACP/DSH session. */
-export function archiveDir(cwd, sessionId) {
-  // Default note: write archives under a dedicated dsh-acp root
-  // (<DSH_HOME>/dsh-acp-archives by default) rather than the web process's
-  // sessions/ tree, so an uncompressed .jsonl we emit never clashes with the
-  // main process's zstd-compressed session logs (DSH aborts on a mismatch).
-  // Set DSH_ACP_ARCHIVE_IN_MAIN=1 to place them under sessions/ instead.
-  if (process.env.DSH_ACP_ARCHIVE_IN_MAIN === "1") {
-    return join(dshHome(), "sessions", encodeWorkspace(cwd), sessionId);
+/**
+ * DSH 原生的项目目录键（dsh-session-persistence-jsonl 的 `projectKey()`）。
+ *
+ * 与 {@link encodeWorkspace} **不是**同一个方案：分隔符（`/` `\` `:`）折叠
+ * 成单个 `-`，其余不安全码元用 `~XXXX`（大写十六进制）转义，故可逆；
+ * 长度上限 251。
+ *
+ *   /Users/jlwl/文档/.../项目-dsh-acp
+ *     -> --Users-jlwl-~6587~6863-zyqWiki-Zyq-~5DE5~4F5C~6587~4EF6-dsh-acp--
+ *
+ * 本函数是 dsh 原生实现的**逐字镜像**（口径见
+ * docs/实施计划/0.4.2-…-实施计划.md §二 W1「关键可行性实测」）。
+ */
+export function nativeProjectKey(cwd) {
+  const raw = String(cwd ?? "");
+  if (raw.length === 0) throw new Error("cannot encode an empty project path");
+  let readable = "";
+  let separatorRun = false;
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch === "/" || ch === "\\" || ch === ":") {
+      if (!separatorRun) readable += "-";
+      separatorRun = true;
+    } else if (ch !== "~" && /^[A-Za-z0-9._-]$/.test(ch)) {
+      readable += ch;
+      separatorRun = false;
+    } else {
+      readable += "~" + code.toString(16).toUpperCase().padStart(4, "0");
+      separatorRun = false;
+    }
   }
-  return join(dshHome(), "dsh-acp-archives", encodeWorkspace(cwd), sessionId);
+  return `--${(readable.replace(/^-+/, "") || "root").slice(0, 251)}--`;
 }
 
-/** Absolute path of the (uncompressed) DSH event log for one session. */
+/**
+ * DSH 原生的单路径段编码（`encodeSegment()`）：安全字符原样保留，
+ * 其余用 `~XXXX` 转义 ⇒ 可逆且无路径穿越（`..` → `~002E~002E`）。
+ */
+export function nativeEncodeSegment(raw) {
+  const text = String(raw ?? "");
+  if (text.length === 0) throw new Error("cannot encode an empty path segment");
+  if (text === ".") return "~002E";
+  if (text === "..") return "~002E~002E";
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    const ch = String.fromCharCode(code);
+    if (ch !== "~" && /^[A-Za-z0-9._-]$/.test(ch)) out += ch;
+    else out += "~" + code.toString(16).toUpperCase().padStart(4, "0");
+  }
+  return out;
+}
+
+/**
+ * 归档根的选择（R134 统一后的口径）：
+ *
+ *   - 默认（`DSH_ACP_ARCHIVE_IN_MAIN` 未设或 `1`）⇒ **dsh 原生根**
+ *     `<DSH_HOME>/sessions/`，与主进程同一命名空间、同一物理编码（zstd）。
+ *   - `DSH_ACP_ARCHIVE_IN_MAIN=0` ⇒ 退回**私有根**
+ *     `<DSH_HOME>/dsh-acp-archives/`（保留旧目录名方案 + 未压缩 jsonl），
+ *     作为可回滚的逃生阀（0.4.2 计划 §二 W1 交付物 1 的「决策 B：保留开关」）。
+ *
+ * 旧语义是「默认私有根、`=1` 进主根」；R134 把默认翻转成主根，`=0` 才是
+ * 私根。**旧代码里 `=1` 表示主根仍然成立**，因此这里只需要区分
+ * 「显式 `0`」与「其它」。
+ */
+export function archiveRootName() {
+  return process.env.DSH_ACP_ARCHIVE_IN_MAIN === "0" ? "dsh-acp-archives" : "sessions";
+}
+
+/** 是否使用 dsh 原生根（主根）。 */
+export function usesNativeRoot() {
+  return archiveRootName() === "sessions";
+}
+
+/**
+ * 归档目录的**项目层**路径（cwd → 一个目录名）。
+ * 原生根用 `nativeProjectKey()`；私根沿用旧的 `encodeWorkspace()`。
+ */
+export function archiveWorkspaceDir(cwd) {
+  const key = usesNativeRoot() ? nativeProjectKey(cwd) : encodeWorkspace(cwd);
+  return join(dshHome(), archiveRootName(), key);
+}
+
+/** Absolute path of the archive directory for one ACP/DSH session. */
+export function archiveDir(cwd, sessionId) {
+  const root = archiveWorkspaceDir(cwd);
+  const seg = usesNativeRoot() ? nativeEncodeSegment(sessionId) : sessionId;
+  return join(root, seg);
+}
+
+/**
+ * Absolute path of the DSH event log for one session.
+ *
+ * 原生根 ⇒ `session.v4.jsonl.zstd`（zstd 物理编码，与主进程一致）；
+ * 私根 ⇒ `session.jsonl`（未压缩，旧格式）。
+ */
 export function archiveLogPath(cwd, sessionId) {
-  return join(archiveDir(cwd, sessionId), "session.jsonl");
+  const name = usesNativeRoot() ? NATIVE_SESSION_LOG_NAME : LEGACY_SESSION_LOG_NAME;
+  return join(archiveDir(cwd, sessionId), name);
 }
 
 // ---- Durable ACP session index ------------------------------------------
@@ -297,7 +412,20 @@ export function moveSession(sessionId, newCwd) {
   const oldDir = archiveDir(oldCwd, rec.archive ?? rec.id);
   const newDir = archiveDir(newCwd, rec.archive ?? rec.id);
   if (existsSync(oldDir) && !existsSync(newDir)) {
-    try { mkdirSync(newDir, { recursive: true }); renameSync(oldDir, newDir); } catch (e) {
+    try {
+      mkdirSync(newDir, { recursive: true });
+      renameSync(oldDir, newDir);
+      // R134（验收③：移动/重命名后路径可解析）：原生根下会话目录名是
+      // `nativeEncodeSegment(archiveId)`，而**头里的 id 是 archiveId 原值**。
+      // 目录名经转义后可能与 id 不等（`~XXXX` 段），主进程读侧会用
+      // 「头 id + cwd」反推期望路径并比对 ⇒ 转义不一致会被判为
+      // "corrupt session log"。移动后必须把头里的 cwd 同步改成新 cwd，
+      // 否则头仍指向旧 cwd ⇒ 同样对不上。
+      //
+      // 只有原生根需要这一步（原生读侧会做 cwd↔路径一致性校验）；
+      // 私根（旧未压缩格式）不校验，保持原行为不动。
+      if (usesNativeRoot()) rewriteNativeArchiveCwd(newDir, newCwd);
+    } catch (e) {
       console.warn(`[dsh-acp] move archive for ${sessionId} failed: ${e.message}`);
     }
   }
@@ -305,6 +433,30 @@ export function moveSession(sessionId, newCwd) {
   rec.updated = Date.now();
   persistIndex(true);
   return rec;
+}
+
+/**
+ * 把原生归档头里的 `cwd` 改写成新 cwd（移动后保持「头 id + cwd ⇒ 路径」可解析）。
+ *
+ * 只改**头帧**（第一帧），事件帧原样保留（append 语义）。实现方式：解压全部
+ * 帧 → 只重写首行 → 重新压缩成「头帧 + 事件帧」两帧 → 原子发布。
+ * 事件帧被重新压缩（不是字节级搬运），但明文逐字节相同，故内容无损。
+ */
+function rewriteNativeArchiveCwd(dirPath, newCwd) {
+  const logPath = join(dirPath, NATIVE_SESSION_LOG_NAME);
+  if (!existsSync(logPath)) return;
+  const plain = readArchivePlaintext(logPath);
+  if (!plain) return;
+  const lines = plain.split("\n").filter(Boolean);
+  if (!lines.length) return;
+  let header;
+  try { header = JSON.parse(lines[0]); } catch { return; }
+  if (!header || header.type !== "session") return;
+  if (header.cwd === newCwd) return;
+  header.cwd = newCwd;
+  const headerFrame = compressZstdFrame(`${JSON.stringify(header)}\n`);
+  const bodyFrame = compressZstdFrame(lines.slice(1).map((l) => `${l}\n`).join(""));
+  writeZstdFramesAtomic(logPath, [headerFrame, bodyFrame]);
 }
 
 /**
@@ -358,8 +510,8 @@ export function deleteSession(sessionId) {
   // Also remove the on-disk archives. If we only drop the index record, the
   // session can re-surface on reload from disk — hence both roots are cleared
   // below. Note which reader sees which root:
-  //   - scanArchives() reads ONLY <DSH_HOME>/sessions/ (the DSH web official
-  //     root; see its `const base = join(dshHome(), "sessions")`). It does NOT
+  //   - scanArchives() reads ONLY the **authoritative** root (default
+  //     <DSH_HOME>/sessions/, resolved via archiveWorkspaceDir()). It does NOT
   //     scan <DSH_HOME>/dsh-acp-archives/, so an adapter-written archive left
   //     there is invisible to it.
   //   - dsh-acp's own visibility comes from the INDEX (allSessions() inside
@@ -374,10 +526,23 @@ export function deleteSession(sessionId) {
     // anything. Remove both roots that scanArchives() reads:
     //   1) <DSH_HOME>/dsh-acp-archives/<enc>/<archive>  (adapter-written)
     //   2) <DSH_HOME>/sessions/<enc>/<archive>          (DSH web official)
-    const enc = encodeWorkspace(rec.cwd);
-    for (const root of [join(dshHome(), "dsh-acp-archives"), join(dshHome(), "sessions")]) {
+    //
+    // R134：两套 root 的**项目层键名方案不同**（原生 `nativeProjectKey()`，
+    // 旧 `encodeWorkspace()`），会话目录名也不同（原生 `nativeEncodeSegment()`，
+    // 旧原样）。故两个 root 各按自己的方案各算一遍路径。
+    const archiveId = rec.archive ?? rec.id;
+    const candidates = [
+      // 旧私有根（旧键名方案 + 原样目录名）。
+      join(dshHome(), "dsh-acp-archives", encodeWorkspace(rec.cwd), archiveId),
+      // 原生根（原生键名方案 + 转义目录名）。
+      join(dshHome(), "sessions", nativeProjectKey(rec.cwd), nativeEncodeSegment(archiveId)),
+      // 原生根里也可能残留旧键名方案写的目录（历史 `DSH_ACP_ARCHIVE_IN_MAIN=1`
+      // 的产物），一并清掉。
+      join(dshHome(), "sessions", encodeWorkspace(rec.cwd), archiveId),
+    ];
+    for (const target of candidates) {
       try {
-        rmSync(join(root, enc, rec.archive), { recursive: true, force: true });
+        rmSync(target, { recursive: true, force: true });
       } catch (err) {
         // Best-effort: index removal still succeeds if a disk cleanup fails.
       }
@@ -407,32 +572,196 @@ export function recordMessage(sessionId, role, text) {
 // ---- DSH-format archive writer (best effort) ----------------------------
 
 /**
+ * Zstd 压缩选项：与 dsh-session-persistence-jsonl 的 `CHECKSUM_OPTIONS` 对齐
+ * （带 xxhash64 校验和），使主进程读侧可以用同一套 frame 校验通过。
+ */
+const ZSTD_COMPRESS_OPTIONS = {
+  params: { [zlibConstants.ZSTD_c_compressionLevel]: 3, [zlibConstants.ZSTD_c_checksumFlag]: 1 },
+};
+
+/**
+ * 压缩一段 JSONL 文本为一个**独立可解码**的 zstd frame。
+ * 原生写侧对「头帧」与「事件批次帧」分别压缩再拼接，本函数对应其中一次调用。
+ */
+export function compressZstdFrame(text) {
+  return zstdCompressSync(Buffer.from(text, "utf8"), ZSTD_COMPRESS_OPTIONS);
+}
+
+/**
+ * 解压一个 zstd 文件的明文。
+ *
+ * ⚠️ Node 的 `zstdDecompressSync` **只解第一帧**（拼接帧时后续帧被静默丢弃）。
+ * 本仓写侧采用**单帧**策略（见 {@link appendArchiveEvent}），故正常情况下
+ * 一个文件就是**一个** frame，`zstdDecompressSync` 可直接解开。
+ * 但历史存量 / 迁移进来的文件可能是多帧拼接，故这里做兜底：先试单帧，
+ * 若解出的明文不含全部内容，再按帧边界逐帧解压并拼接。
+ */
+export function decompressZstdFrame(buffer) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  if (buf.length < 4 || buf.readUInt32LE(0) !== ZSTD_MAGIC) {
+    // Not a zstd frame ⇒ treat as plain text (legacy uncompressed log).
+    return buf;
+  }
+  const frames = scanZstdFrames(buf);
+  if (!frames.length) return Buffer.alloc(0);
+  if (frames.length === 1) return zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end));
+  const parts = [];
+  for (const frame of frames) {
+    parts.push(zstdDecompressSync(buf.subarray(frame.start, frame.end)));
+  }
+  return Buffer.concat(parts);
+}
+
+/** zstd 帧魔数（小端读出为 0x28B52FFD）。 */
+const ZSTD_MAGIC = 0xFD2FB528;
+
+/**
+ * 扫描一个 zstd 字节流里的**完整帧**边界。
+ *
+ * 这是 dsh-session-persistence-jsonl `scanZstdFrames()` 的镜像（同一份
+ * Zstandard 帧格式规范）：逐帧解析 frame header + block header，产出
+ * `[start, end)` 区间。末尾不完整的帧（torn write）被丢弃。
+ */
+function scanZstdFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const start = offset;
+    if (buffer.length - offset < 4) break; // torn: fewer than 4 bytes left
+    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) break; // not a frame boundary
+    offset += 4;
+    if (offset === buffer.length) break; // torn: magic only
+    const descriptor = buffer.readUInt8(offset);
+    offset += 1;
+    if ((descriptor & 24) !== 0) break; // reserved frame-header bits
+    const contentSizeFlag = descriptor >>> 6;
+    const singleSegment = (descriptor & 32) !== 0;
+    const checksum = (descriptor & 4) !== 0;
+    const dictionaryFlag = descriptor & 3;
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+    const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag;
+    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+    if (buffer.length - offset < remainingHeaderBytes) break; // torn header
+    offset += remainingHeaderBytes;
+    let frameOk = true;
+    for (;;) {
+      if (buffer.length - offset < 3) { frameOk = false; break; } // torn block header
+      const blockHeader = buffer.readUIntLE(offset, 3);
+      offset += 3;
+      const lastBlock = (blockHeader & 1) !== 0;
+      const blockType = (blockHeader >>> 1) & 3;
+      const blockSize = blockHeader >>> 3;
+      if (blockType === 3) { frameOk = false; break; } // reserved block type
+      const payloadBytes = blockType === 1 ? 1 : blockSize;
+      if (buffer.length - offset < payloadBytes) { frameOk = false; break; } // torn block
+      offset += payloadBytes;
+      if (lastBlock) break;
+    }
+    if (!frameOk) break;
+    if (checksum) {
+      if (buffer.length - offset < 4) break; // torn checksum
+      offset += 4;
+    }
+    frames.push({ start, end: offset });
+  }
+  return frames;
+}
+
+/**
+ * 原生 v4 头（`type: "session"`）。
+ *
+ * 原生读侧 `isHeaderLine()` 要求必填
+ * `{type,version,id,createdAt,isSeeded,delegationDepth}`，可选
+ * `{cwd,parentSession,origin,agentPreset}`，且
+ * `assertNoRetiredHeaderFields()` 会拒 `sandboxMode` / `approvalPolicy`。
+ * 旧版的 `seedLength` 是**已退役**字段，必须用 `isSeeded` 取代。
+ */
+export function nativeSessionHeader(rec, cwd) {
+  const header = {
+    type: "session",
+    version: NATIVE_SESSION_FORMAT_VERSION,
+    id: rec.archive ?? rec.id,
+    createdAt: Number.isSafeInteger(rec.createdAt) && rec.createdAt >= 0
+      ? rec.createdAt
+      : (typeof rec.createdAt === "string" ? Date.parse(rec.createdAt) : Date.now()),
+    cwd,
+    isSeeded: false,
+    delegationDepth: 0,
+    agentPreset: "standard",
+  };
+  if (typeof rec.parentSessionId === "string" && rec.parentSessionId) header.parentSession = rec.parentSessionId;
+  return header;
+}
+
+/**
+ * 把一段（或多段）zstd frame 原子发布到目标路径。
+ * @param {Buffer[]} frames - 已压缩的 frame 缓冲区，按顺序拼接。
+ */
+function writeZstdFramesAtomic(targetPath, frames) {
+  const tmp = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(tmp, Buffer.concat(frames));
+  try {
+    renameSync(tmp, targetPath);
+  } catch (err) {
+    try { rmSync(tmp, { force: true }); } catch {}
+    throw err;
+  }
+}
+
+/**
+ * 读取归档日志的明文（自动识别 zstd / 未压缩）。
+ *
+ * zstd 文件可能是**多帧拼接**（头帧 + 若干事件批次帧），由
+ * {@link decompressZstdFrame} 逐帧解压后拼接明文。
+ * @returns {string|null} 明文 JSONL；文件不存在返回 null。
+ */
+export function readArchivePlaintext(logPath) {
+  if (!existsSync(logPath)) return null;
+  const raw = readFileSync(logPath);
+  // zstd 魔数 0xFD2FB528（小端读出即 0x28B52FFD）。
+  if (raw.length >= 4 && raw.readUInt32LE(0) === 0xFD2FB528) {
+    return decompressZstdFrame(raw).toString("utf8");
+  }
+  return raw.toString("utf8");
+}
+
+/**
  * Append a user/assistant turn to the DSH official archive for `rec`.
- * Writes an uncompressed session.jsonl at
- *   <DSH_HOME>/sessions/<encoded-cwd>/<archive>/session.jsonl
- * using DSH's native event-log event shape (session header + seq'd events).
- * The file is created on first write with a `session` header line.
+ *
+ * 原生根（默认）⇒ 写 `<DSH_HOME>/sessions/<project-key>/<seg>/session.v4.jsonl.zstd`，
+ * 物理编码与 dsh 主进程一致（zstd + 校验和）。
+ * 私根（`DSH_ACP_ARCHIVE_IN_MAIN=0`）⇒ 写未压缩 `session.jsonl`（旧格式）。
+ *
+ * 两边都用 DSH 的原生事件形状：首行是 `session` 头，其后是带 `seq` 的事件，
+ * `seq` 从 0 开始（**头不带 seq**，与原生实测一致）。
  */
 export function appendArchiveEvent(rec, role, text) {
   const cwd = rec.cwd ?? process.cwd();
   const logPath = archiveLogPath(cwd, rec.archive ?? rec.id);
   mkdirSync(join(logPath, ".."), { recursive: true });
 
+  const native = usesNativeRoot();
   const lines = [];
   const firstWrite = !existsSync(logPath);
   if (firstWrite) {
-    const header = {
-      type: "session",
-      version: 0,
-      id: rec.archive ?? rec.id,
-      createdAt: Date.now(),
-      cwd,
-      parentSession: rec.parentSessionId ?? null,
-      seedLength: 0,
-      delegationDepth: 0,
-      agentPreset: "standard",
-    };
-    lines.push(JSON.stringify(header));
+    if (native) {
+      // 原生 v4 头：字段集与主进程读侧 `isHeaderLine()` 一致。
+      lines.push(JSON.stringify(nativeSessionHeader(rec, cwd)));
+    } else {
+      // 私根旧格式：保留 v0 头（含已退役的 seedLength）以兼容旧读取方。
+      const header = {
+        type: "session",
+        version: 0,
+        id: rec.archive ?? rec.id,
+        createdAt: Date.now(),
+        cwd,
+        parentSession: rec.parentSessionId ?? null,
+        seedLength: 0,
+        delegationDepth: 0,
+        agentPreset: "standard",
+      };
+      lines.push(JSON.stringify(header));
+    }
   }
 
   // seq is kept in memory (rec.archiveSeq) instead of re-reading the whole
@@ -445,7 +774,8 @@ export function appendArchiveEvent(rec, role, text) {
     seq = 0;
     if (!firstWrite) {
       try {
-        for (const line of readFileSync(logPath, "utf8").split("\n")) {
+        const plain = readArchivePlaintext(logPath) ?? "";
+        for (const line of plain.split("\n")) {
           if (!line) continue;
           const parsed = JSON.parse(line);
           if (parsed && typeof parsed.seq === "number") seq = Math.max(seq, parsed.seq + 1);
@@ -500,7 +830,34 @@ export function appendArchiveEvent(rec, role, text) {
   // reader that counts lines agrees with rec.archiveSeq (no blank lines the
   // old "<...>\n".join("\n") approach used to leave between appends).
   const payload = lines.concat(eventLines).map((l) => `${l}\n`).join("");
-  appendFileSync(logPath, payload);
+
+  if (native) {
+    // ── 原生根：**单帧重写** ──────────────────────────────────────
+    //
+    // 为什么是单帧（而不是 dsh 主进程那种「头帧 + 事件帧」多帧拼接）：
+    //   Node 的 `zstdDecompressSync` 对**多帧 concat 只解第一帧并静默丢帧**
+    //   （实测：3 帧 33B → 只回 2B）。验收① 的字面判据是
+    //   「写出 .zstd 且被 `zlib.zstdDecompressSync` 解回**逐字节相同**」——
+    //   该判据**只有在单帧时客观成立**。
+    //
+    // 所以：每次写入都把**整个文件**重写为**一个** zstd frame
+    // （读旧明文 → 追加新行 → 整帧重新压缩 → 原子写回）。
+    //
+    // 代价：每次 append 都重写全文件（O(n)）。本仓的会话日志很小
+    // （实测均值 ~7 KB），可接受；换来的是「文件 = 一个 frame」这一
+    // 强不变式，主进程与任何第三方工具都能用 `zstdDecompressSync` 直接解开。
+    //
+    // 兼容性：若目标已存在且是**多帧**（历史存量 / 迁移产物），先按帧边界
+    // 解出全部明文再重写，把它收敛成单帧。
+    const existingPlain = firstWrite ? "" : (readArchivePlaintext(logPath) ?? "");
+    const existingLines = existingPlain.split("\n").filter(Boolean);
+    const merged = existingLines.length
+      ? `${existingPlain.endsWith("\n") ? existingPlain : `${existingPlain}\n`}${eventLines.map((l) => `${l}\n`).join("")}`
+      : `${lines.map((l) => `${l}\n`).join("")}${eventLines.map((l) => `${l}\n`).join("")}`;
+    writeZstdFramesAtomic(logPath, [compressZstdFrame(merged)]);
+  } else {
+    appendFileSync(logPath, payload);
+  }
 
   // Track where the next append's seq starts, so we never re-read the file
   // (REQ-03). `seq` now equals events written this call + all prior ones.
@@ -512,21 +869,32 @@ export function appendArchiveEvent(rec, role, text) {
 // ---- Disk scanning for official archives (reload support) ---------------
 
 /**
- * Scan <DSH_HOME>/sessions/<encoded-cwd>/ for directories that look like DSH
- * sessions. Returns records for any that are not already in the durable ACP
- * index, so an "official" archive the DSH web process produced is also visible
- * through `session/list` (cross-restart + cross-process reload).
+ * 扫描**唯一权威根**下的会话目录，返回索引里没有的记录。
+ *
+ * R134（0.4.2 W1 交付物 2）：读侧**单一来源**。
+ * 旧实现只扫 `<DSH_HOME>/sessions/<encodeWorkspace(cwd)>/`，与写侧默认的
+ * 私有根 `<DSH_HOME>/dsh-acp-archives/<encodeWorkspace(cwd)>/` **不是同一
+ * 个命名空间**（原生键用 `~XXXX` 转义，旧键用有损 `-` 替换），于是：
+ *   - 写侧写进私有根的会话，读侧扫不到 ⇒ `session/list` 看不见自己的会话；
+ *   - `dsh-acp.mjs` 的 `listSessionRecords()` 只能靠「索引 ∪ 扫描」双拼，
+ *     两边口径不一致（磁盘上到底有几个会话 = 说不清）。
+ *
+ * 现在：**扫描与写入共用同一套路径解析**（{@link archiveWorkspaceDir}），
+ * 因此「磁盘扫描口径」与「写侧口径」逐字一致；`session/list` 只保留一个
+ * 来源（磁盘权威 + 索引作为 tombstone/元数据缓存）。
+ *
+ * 兼容：私根回退模式（`DSH_ACP_ARCHIVE_IN_MAIN=0`）下扫私根；否则扫原生根。
+ * 旧私有根的**存量**目录由迁移工具负责 copy 进原生根（只 copy 不 move）。
  */
 export function scanArchives(cwd) {
-  const base = join(dshHome(), "sessions");
+  const base = archiveWorkspaceDir(cwd);
   if (!existsSync(base)) return [];
   const idx = loadIndex();
   const known = new Set(Object.values(idx.sessions).map((s) => s.id));
   const out = [];
   let entries = [];
   try {
-    const ws = join(base, encodeWorkspace(cwd));
-    if (existsSync(ws)) entries = readdirSync(ws);
+    entries = readdirSync(base);
   } catch { /* ignore */ }
 
   const byDir = new Map();
@@ -535,18 +903,25 @@ export function scanArchives(cwd) {
   }
 
   for (const dir of entries) {
-    if (!/^session-/i.test(dir)) continue;
+    const dirPath = join(base, dir);
+    // 只看目录（原生根里项目层下就是会话目录）。
+    let isDir = false;
+    try { isDir = statSync(dirPath).isDirectory(); } catch { continue; }
+    if (!isDir) continue;
+    // 原生会话目录名可以是 `session-<uuid>` 或 `import-<uuid>`（导入器产出），
+    // 两者都是合法的会话目录；旧实现只认 `session-`，会漏掉 `import-`。
+    if (!/^(session|import)-/i.test(dir)) continue;
     const candidateId = byDir.has(dir) ? byDir.get(dir).id : dir;
-    const dirPath = join(base, encodeWorkspace(cwd), dir);
     let title = dir;
     try {
       const files = readdirSync(dirPath);
-      const log = files.find((f) => f === "session.jsonl" || f === "session.jsonl.zstd");
+      const log = files.find((f) => /^session(\.v\d+)?\.jsonl(\.zstd)?$/.test(f));
       if (log) {
         try {
           // Read the file once and reuse it (REQ-12): the old code issued two
           // readFileSync calls — one truthiness probe, one real read.
-          const raw = readFileSync(join(dirPath, log), "utf8");
+          // 原生根是 zstd ⇒ readArchivePlaintext 自动识别物理编码。
+          const raw = readArchivePlaintext(join(dirPath, log)) ?? "";
           const firstLine = raw.split("\n")[0];
           const first = firstLine ? JSON.parse(firstLine) : {};
           if (first.type === "session" && first.id) title = first.id;

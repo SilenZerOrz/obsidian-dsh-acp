@@ -30,6 +30,15 @@
 //   POST /api-session/move            body:{sessionId, cwd}
 //                                   -> { ok:true, session }
 //
+//   GET  /api-session/events          （SSE，W2-a 跨界面会话同步）
+//                                   -> text/event-stream：
+//                                      event: ready     data:{ok:true,mode:"sse"}
+//                                      event: session   data:{kind,sessionId,type,seq,...}
+//                                      event: fallback  data:{mode:"polling",reason}（订阅不可用）
+//                                      订阅源 = ctx.on('session/event', (session,event)=>)；
+//                                      不可用（无 ctx.on / 抛错 / 未返回注销器）时发 fallback 帧
+//                                      并结束，前端 EventSource 收到后切轮询（lib/client.js）。
+//
 //   POST /api-session/dsh-list        body:{}
 //                                   -> { ok:true, sessions:[{sessionId,title,cwd,updatedAt,...}] }
 //                                      调 sp.list()，与 dsh 主进程侧栏同源。
@@ -153,6 +162,158 @@ async function summarizeDshSessionDetail(sp, sessionId) {
     }
   } catch { /* 读取失败：保留空字段 */ }
   return detail;
+}
+
+// ─── W2-a：跨界面会话同步的事件广播（SSE）────────────────────────────────
+//
+// 决策点「跨界面刷新 B」＝ 订阅 `ctx.on('session/event')` + HTTP 路由分发。
+//
+// 上游实测口径（dsh 0.2.2-rc.3）：
+//   * `session/event` 的载荷是 `(session, event)`，`session` 为 `@deepseek-ai/dsh-session`
+//     的 Session 实例（`session.id` / `session.header` 可用），`event` 是已提交的事件
+//     （`{type,seq,data,...}`）。它由 SessionStore 在**每次 commit 后逐事件**同步分发
+//     （dsh-session/lib/index.js `commit()` → invokeContainedSessionObservers）。
+//   * 因此这里只做**转发**：不解释业务语义、不裁剪字段（unknown 字段原样透传），
+//     前端拿到的帧形状变了也只是多一个未知字段，不会断。
+//   * `ctx.on()` 返回注销器；拿不到注销器视为「订阅不可用」，发 fallback 帧后断开，
+//     让前端切轮询。这样「订阅不可用」不会静默变成「永远收不到更新」。
+//
+// 广播池（listeners）挂在模块级：`registerSessionPanelRoutes` 在 host 上可能被调用
+// 两次（H2f 合并门 + webServer 兜底门），而**订阅只能建一次**（重复订阅会让每个事件
+// 被推两遍）。池子是进程内的，天然跨路由实例共享。
+
+/** 活跃 SSE 连接集合（每个元素 = 一个连接的最小写接口）。 */
+const eventStreams = new Set();
+
+/** 进程内唯一的 `session/event` 订阅（幂等；重复调用返回同一份）。 */
+let sessionEventSubscription = null;
+
+/** 最近一次广播的载荷摘要，供路由自检 / 测试断言（不进 HTTP 响应）。 */
+let lastBroadcast = null;
+
+/** 一条连接一次广播最多等多久；超时丢弃该帧，绝不阻塞上游 commit。 */
+const BROADCAST_WRITE_TIMEOUT_MS = 2000;
+/** SSE 心跳间隔：防止中间层（代理 / 浏览器）把空闲连接判死。 */
+const SSE_HEARTBEAT_MS = 25000;
+/** 单条连接待发队列上限；超了说明该客户端已死或极慢，直接断开释放资源。 */
+const SSE_MAX_BUFFERED_FRAMES = 512;
+
+/** 把 `(session, event)` 归一成一个可 JSON 化的转发帧（宽容解析）。 */
+export function normalizeSessionEventFrame(session, event) {
+  const sessionId = (session && (session.id || session.sessionId))
+    || (session && session.header && session.header.id)
+    || (event && event.sessionId)
+    || "";
+  const type = event && typeof event.type === "string" ? event.type : "";
+  const seq = event && Number.isFinite(event.seq) ? event.seq : undefined;
+  // kind：让前端不必自己解析事件名——新建 / 删除 / 其他。删除类事件在上游没有
+  // 单独的事件类型（`session/disposed` 是 ctx 级事件，不走 session/event），
+  // 故这里只做「能确定的」归类，其余一律 unknown（前端表现为「有变化，刷新」）。
+  const kind = /^session\/(created|start)$/.test(type) ? "created"
+    : /^session\/(deleted|removed)$/.test(type) ? "deleted"
+    : "event";
+  return {
+    kind,
+    sessionId,
+    type,
+    seq,
+    // 事件本体原样透传（unknown 字段保留），前端按需读取；不做二次深拷贝以外的裁剪。
+    event: event ?? null,
+    // 会话头（若有）：标题 / cwd 变化时前端可直接更新行而不必再拉全表。
+    header: (session && session.header) ? {
+      id: session.header.id,
+      cwd: session.header.cwd,
+      agentPreset: session.header.agentPreset,
+      parentSession: session.header.parentSession,
+    } : undefined,
+    at: Date.now(),
+  };
+}
+
+/** 向所有活跃连接广播一帧。写失败/超时只影响该连接，异常一律吞掉。 */
+function broadcastSessionEvent(frame) {
+  lastBroadcast = frame;
+  if (!eventStreams.size) return;
+  for (const stream of [...eventStreams]) {
+    try {
+      stream.send("session", frame);
+    } catch { /* 单连接失败不影响其它连接 */ }
+  }
+}
+
+/**
+ * 建立一次 `session/event` 订阅（进程内幂等）。
+ * @returns {{ ok:true, off:Function } | { ok:false, reason:string }}
+ */
+export function subscribeSessionEvents(ctx) {
+  if (!ctx || typeof ctx.on !== "function") {
+    return { ok: false, reason: "ctx.on 不可用（宿主未提供事件总线）" };
+  }
+  if (sessionEventSubscription && sessionEventSubscription.ok) return sessionEventSubscription;
+  let off = null;
+  try {
+    off = ctx.on("session/event", (session, event) => {
+      let frame;
+      try {
+        frame = normalizeSessionEventFrame(session, event);
+      } catch (e) {
+        // 归一化失败也发一帧「有变化」，前端据此刷新——绝不静默丢事件。
+        frame = { kind: "event", sessionId: "", type: "", event: null, error: String((e && e.message) || e), at: Date.now() };
+      }
+      broadcastSessionEvent(frame);
+    });
+  } catch (e) {
+    return { ok: false, reason: `ctx.on('session/event') 抛错：${(e && e.message) || e}` };
+  }
+  if (typeof off !== "function") {
+    return { ok: false, reason: "ctx.on('session/event') 未返回注销器" };
+  }
+  sessionEventSubscription = { ok: true, off };
+  return sessionEventSubscription;
+}
+
+/** 当前订阅状态（测试 / 自检用）。 */
+export function sessionEventSubscriptionStatus() {
+  return sessionEventSubscription && sessionEventSubscription.ok
+    ? { ok: true, streams: eventStreams.size, lastBroadcast }
+    : { ok: false, reason: sessionEventSubscription?.reason ?? "尚未订阅", streams: eventStreams.size };
+}
+
+/** SSE 帧编码（id 省略：本通道不做断线重放，前端以「收到即刷新」为准）。 */
+function sseFrame(eventName, payload) {
+  return `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+/**
+ * 写一帧并等待 socket 缓冲回落。返回 false 表示该连接已不可用（应清理）。
+ *
+ * 用 `drain` 事件而不是裸 `write` 的返回值：`write()===false` 只表示「超过
+ * highWaterMark」，不代表失败；但一直等不到 drain 就是死连接，故加超时。
+ */
+function writeWithTimeout(res, text) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), BROADCAST_WRITE_TIMEOUT_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    try {
+      const flushed = res.write(text);
+      if (flushed === false && typeof res.once === "function") {
+        res.once("drain", () => done(true));
+        res.once("close", () => done(false));
+        res.once("error", () => done(false));
+      } else {
+        done(true);
+      }
+    } catch {
+      done(false);
+    }
+  });
 }
 
 /** 注册 P1b 面板路由到 dsh webServer。ctx 是 apply 的外层 ctx（handler 闭包用它访问
@@ -390,6 +551,89 @@ export function registerSessionPanelRoutes(ctx, ws) {
       } catch (err) {
         sendError(res, 500, (err && err.message) || err);
       }
+    },
+  });
+
+  // ─── W2-a：跨界面会话同步 SSE ──────────────────────────────────────────
+  //
+  // GET /api-session/events。返回 text/event-stream，内部订阅 dsh 的
+  // `session/event`；任一界面（dsh web 主进程 / ACP adapter 写入的会话）产生
+  // 事件时，另一端据此刷新列表。
+  //
+  // 降级契约（验收④「订阅不可用时回退轮询且无报错」）：
+  //   订阅不可用 ⇒ 先发一帧 `event: fallback`（含 reason）再正常结束响应。
+  //   EventSource 在响应结束时会自动重连，前端**必须**在收到 fallback 后主动
+  //   `close()` 并切轮询，否则会陷入「重连 → fallback → 重连」的空转。
+  ws.register({
+    kind: "exact",
+    path: "/api-session/events",
+    handler: async (req, res) => {
+      const sub = subscribeSessionEvents(ctx);
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        "connection": "keep-alive",
+        "x-accel-buffering": "no",
+      });
+      if (!sub.ok) {
+        res.write(sseFrame("fallback", { mode: "polling", reason: sub.reason }));
+        res.end();
+        return;
+      }
+      res.write(sseFrame("ready", { ok: true, mode: "sse" }));
+
+      // 每连接一个有界队列：广播是同步入口（上游 commit 期间），不能在那里
+      // 直接写 socket（背压会把宿主写阻塞）。队列 + 单飞异步排空。
+      const queue = [];
+      let draining = false;
+      let closed = false;
+      const stream = {
+        send(_event, payload) {
+          if (closed) return;
+          if (queue.length >= SSE_MAX_BUFFERED_FRAMES) {
+            // 慢客户端：断开而不是无限堆积（前端会重连/降级，不会丢服务端状态）。
+            cleanup();
+            return;
+          }
+          queue.push(payload);
+          void drain();
+        },
+      };
+      const drain = async () => {
+        if (draining || closed) return;
+        draining = true;
+        try {
+          while (queue.length && !closed) {
+            const payload = queue.shift();
+            const ok = await writeWithTimeout(res, sseFrame("session", payload));
+            if (!ok) { cleanup(); return; }
+          }
+        } finally {
+          draining = false;
+        }
+      };
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        // 注释行心跳：不是事件帧，EventSource 不会派发给业务回调。
+        try { res.write(": ping\n\n"); } catch { cleanup(); }
+      }, SSE_HEARTBEAT_MS);
+      // 定时器不该吊住进程（node --test / headless 退出不能被它卡住）。
+      if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        queue.length = 0;
+        eventStreams.delete(stream);
+        clearInterval(heartbeat);
+        try { res.end(); } catch { /* 已断开 */ }
+      };
+
+      eventStreams.add(stream);
+      req.on?.("close", cleanup);
+      req.on?.("error", cleanup);
+      res.on?.("close", cleanup);
+      res.on?.("error", cleanup);
     },
   });
 
